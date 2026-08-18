@@ -1,3 +1,9 @@
+> [!IMPORTANT]
+> 本仓库是在 go2rtc `v1.9.14` 基础上维护的 EZVIZ CB2 → HomeKit
+> 局域网反向直连桥接。使用说明见 [LOCAL_HOMEKIT.md](LOCAL_HOMEKIT.md)，
+> Linux/Docker 部署见 [deploy/linux/README.md](deploy/linux/README.md)。
+> 设备序列号、萤石会话和 HomeKit 配对状态均不应提交到 Git。
+
 <h1 align="center">
 
   ![go2rtc](assets/logo.gif)

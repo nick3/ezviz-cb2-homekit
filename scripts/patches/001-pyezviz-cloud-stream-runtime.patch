@@ -1,0 +1,696 @@
+diff --git a/pyezvizapi/__main__.py b/pyezvizapi/__main__.py
+index 184a8d6..0b347c8 100644
+--- a/pyezvizapi/__main__.py
++++ b/pyezvizapi/__main__.py
+@@ -88,6 +88,32 @@ class StreamProxyHTTPServer(ThreadingHTTPServer):
+     block_on_close = False
+ 
+ 
++class _PrefetchedVtmStream:
++    """Replay media packets consumed while proving a VTM session is ready."""
++
++    def __init__(self, stream: Any, packets: list[Any]) -> None:
++        self._stream = stream
++        self._packets = packets
++
++    def __getattr__(self, name: str) -> Any:
++        return getattr(self._stream, name)
++
++    def __exit__(self, *exc_info: object) -> Any:
++        return self._stream.__exit__(*exc_info)
++
++    def iter_packets(self, *, max_packets: int | None = None) -> Any:
++        prefetched, self._packets = self._packets, []
++        remaining = max_packets
++        for packet in prefetched:
++            if remaining is not None and remaining <= 0:
++                return
++            yield packet
++            if remaining is not None:
++                remaining -= 1
++        if remaining is None or remaining > 0:
++            yield from self._stream.iter_packets(max_packets=remaining)
++
++
+ def _parse_duration_seconds(value: str) -> float | None:
+     """Parse a CLI duration value into seconds."""
+ 
+@@ -2281,6 +2307,10 @@ def _copy_stream_payloads_to_mpegts(
+             output.write(chunk)
+             output.flush()
+     finally:
++        stop_stream = getattr(stream, "stop", None)
++        if callable(stop_stream):
++            with suppress(OSError, PyEzvizError):
++                stop_stream(wait_for_response=False)
+         if process.poll() is None:
+             process.terminate()
+         writer.join(timeout=2)
+@@ -2310,6 +2340,85 @@ def _normalize_stream_proxy_path(path: str | None, serial: str) -> str:
+     return path if path.startswith("/") else f"/{path}"
+ 
+ 
++def _prefetch_proxy_media(
++    stream: Any,
++    *,
++    allow_encrypted: bool,
++    packet_count: int = 6,
++) -> _PrefetchedVtmStream:
++    """Require a short MPEG-PS media window before exposing the HTTP stream."""
++
++    packets: list[Any] = []
++    saw_mpeg_ps = False
++    for packet in stream.iter_packets(max_packets=packet_count):
++        if packet.encrypted and not allow_encrypted:
++            raise PyEzvizError(
++                "Received encrypted VTM stream packet; media decryption is not implemented"
++            )
++        packets.append(packet)
++        if detect_transport(packet.body) == StreamTransport.MPEG_PS:
++            saw_mpeg_ps = True
++
++    if len(packets) < packet_count:
++        raise PyEzvizError("VTM stream ended before its media session became ready")
++    if not saw_mpeg_ps:
++        raise PyEzvizError("VTM stream did not deliver MPEG-PS media")
++    return _PrefetchedVtmStream(stream, packets)
++
++
++def _open_started_proxy_stream(
++    config: StreamProxyConfig,
++    client: EzvizClient,
++    *,
++    attempts: int = 6,
++) -> Any:
++    """Open and prove a VTM media stream, retrying before HTTP headers."""
++
++    if attempts < 1:
++        raise PyEzvizError("VTM stream attempts must be greater than zero")
++
++    for attempt in range(attempts):
++        stream: Any | None = None
++        try:
++            stream = open_cloud_stream(
++                client,
++                config.serial,
++                channel=config.channel,
++                client_type=config.client_type,
++                token_index=config.token_index,
++                refresh_vtm=config.refresh_vtm,
++                timeout=config.timeout,
++            )
++            stream = stream.__enter__()
++            response = stream.start()
++            result = getattr(response, "result", None)
++            if result not in (None, 0):
++                detail = (
++                    "device failed to connect to the media server"
++                    if result == 5452
++                    else "stream request rejected"
++                )
++                raise PyEzvizError(f"VTM {detail}: result={result}")
++            if not getattr(response, "streamssn", None):
++                raise PyEzvizError("VTM stream response did not include a session")
++            return _prefetch_proxy_media(
++                stream,
++                allow_encrypted=config.allow_encrypted,
++            )
++        except (OSError, PyEzvizError) as err:
++            if stream is not None:
++                stream.__exit__(type(err), err, err.__traceback__)
++            if attempt + 1 >= attempts:
++                if isinstance(err, PyEzvizError):
++                    raise
++                raise PyEzvizError(
++                    f"Could not open VTM stream after {attempts} attempts: "
++                    f"{type(err).__name__}"
++                ) from err
++            time.sleep(min(float(attempt + 1), 4.0))
++    raise AssertionError("stream retry loop exited unexpectedly")
++
++
+ def _handle_stream_proxy_get(
+     handler: BaseHTTPRequestHandler,
+     config: StreamProxyConfig,
+@@ -2322,36 +2431,28 @@ def _handle_stream_proxy_get(
+         return
+ 
+     response_started = False
++    stream: Any | None = None
+     try:
+-        with open_cloud_stream(
+-            client,
+-            config.serial,
+-            channel=config.channel,
+-            client_type=config.client_type,
+-            token_index=config.token_index,
+-            refresh_vtm=config.refresh_vtm,
+-            timeout=config.timeout,
+-        ) as stream:
+-            stream.start()
+-            process = _open_mpegts_remux_process(config.ffmpeg_path)
+-            handler.send_response(200)
+-            response_started = True
+-            handler.send_header("Content-Type", "video/MP2T")
+-            handler.send_header("Cache-Control", "no-store")
+-            handler.send_header("Connection", "close")
+-            handler.end_headers()
+-            _copy_stream_payloads_to_mpegts(
+-                stream,
+-                cast(BinaryIO, handler.wfile),
+-                process=process,
+-                max_packets=config.max_packets,
+-                allow_encrypted=config.allow_encrypted,
+-                transform_payload=(
+-                    _stream_payload_decryptor(client, config.serial, codec=config.decrypt_codec)
+-                    if config.decrypt_video
+-                    else None
+-                ),
+-            )
++        stream = _open_started_proxy_stream(config, client)
++        process = _open_mpegts_remux_process(config.ffmpeg_path)
++        handler.send_response(200)
++        response_started = True
++        handler.send_header("Content-Type", "video/MP2T")
++        handler.send_header("Cache-Control", "no-store")
++        handler.send_header("Connection", "close")
++        handler.end_headers()
++        _copy_stream_payloads_to_mpegts(
++            stream,
++            cast(BinaryIO, handler.wfile),
++            process=process,
++            max_packets=config.max_packets,
++            allow_encrypted=config.allow_encrypted,
++            transform_payload=(
++                _stream_payload_decryptor(client, config.serial, codec=config.decrypt_codec)
++                if config.decrypt_video
++                else None
++            ),
++        )
+     except (BrokenPipeError, ConnectionResetError):
+         _LOGGER.debug("Stream proxy client disconnected")
+     except PyEzvizError as err:
+@@ -2361,6 +2462,9 @@ def _handle_stream_proxy_get(
+                 handler.close_connection = True
+         else:
+             handler.send_error(502, str(err))
++    finally:
++        if stream is not None:
++            stream.__exit__(None, None, None)
+ 
+ 
+ def _serve_stream_proxy(args: argparse.Namespace, client: EzvizClient) -> None:
+diff --git a/pyezvizapi/cloud_stream.py b/pyezvizapi/cloud_stream.py
+index dff87c9..8cfd657 100644
+--- a/pyezvizapi/cloud_stream.py
++++ b/pyezvizapi/cloud_stream.py
+@@ -4,17 +4,21 @@ from __future__ import annotations
+ 
+ import base64
+ import binascii
++from collections.abc import Callable
+ from dataclasses import dataclass
+ import json
++import time
+ from typing import Any, TypedDict, cast
+ from urllib.parse import urlparse
+ 
++import requests
++
+ from .api_endpoints import (
+     API_ENDPOINT_STREAMING_VTM,
+     API_ENDPOINT_STREAMING_VTM_YS7,
+     API_ENDPOINT_VTDU_TOKEN_V2,
+ )
+-from .constants import MAX_RETRIES
++from .constants import FEATURE_CODE, MAX_RETRIES
+ from .exceptions import HTTPError, PyEzvizError
+ from .stream import SocketFactory, VtmStreamClient, build_vtm_url
+ 
+@@ -108,10 +112,61 @@ def get_vtdu_token_v2(client: Any, max_retries: int = 0) -> VtduTokenResponse:
+     return cast(VtduTokenResponse, json_output)
+ 
+ 
++def get_player_token(
++    client: Any,
++    *,
++    count: int = 100,
++    token_index: int = 0,
++) -> str:
++    """Return one mainland player token using the official app request shape."""
++
++    if count < 1:
++        raise PyEzvizError("Player token count must be greater than zero")
++    if token_index < 0 or token_index >= count:
++        raise PyEzvizError(f"Player token index out of range: {token_index}")
++
++    saved = getattr(client, "_token", {})
++    saved = saved if isinstance(saved, dict) else {}
++    payload = _retry_network_json(
++        lambda: client._request_json(
++            "POST",
++            "/api/user/token/get",
++            data={
++                "sessionId": saved.get("session_id"),
++                "clientType": "3",
++                "osVersion": "Android",
++                "clientVersion": "6.18.1.250717",
++                "netType": "WIFI",
++                "clientNo": "",
++                "clientName": "",
++                "count": str(count),
++                "featureCode": saved.get("feature_code") or FEATURE_CODE,
++            },
++            retry_401=False,
++        ),
++        operation="player token request",
++    )
++    tokens = payload.get("tokenArray")
++    if not _success_retcode(payload.get("resultCode")) or not isinstance(tokens, list):
++        raise PyEzvizError(
++            f"Could not get player token: resultCode={payload.get('resultCode')!r}"
++        )
++    try:
++        token = tokens[token_index]
++    except IndexError as err:
++        raise PyEzvizError(f"Player token index out of range: {token_index}") from err
++    if not isinstance(token, str) or not token:
++        raise PyEzvizError(f"Invalid player token at index {token_index}")
++    return token
++
++
+ def get_vtm_page_list(client: Any) -> JsonDict:
+     """Return pagelist payload filtered to VTM cloud stream metadata."""
+ 
+-    return cast(JsonDict, client._api_get_pagelist(page_filter="VTM", limit=50))
++    return _retry_network_json(
++        lambda: client._api_get_pagelist(page_filter="VTM", limit=50),
++        operation="VTM pagelist request",
++    )
+ 
+ 
+ def get_cloud_stream_info(
+@@ -141,13 +196,36 @@ def get_cloud_stream_info(
+         raise PyEzvizError(f"Could not find VTM resource for serial {serial}{channel_text}")
+ 
+     resource_id = resource.get("resourceId")
+-    tokens = get_vtdu_token_v2(client).get("tokens", [])
+-    try:
+-        vtdu_token = tokens[token_index]
+-    except IndexError as err:
+-        raise PyEzvizError(f"VTDU token index out of range: {token_index}") from err
+-    if not isinstance(vtdu_token, str):
+-        raise PyEzvizError(f"Invalid VTDU token at index {token_index}")
++    channels = pagelist.get("CHANNEL") or {}
++    channel_info = (
++        channels.get(resource_id)
++        if isinstance(channels, dict) and isinstance(resource_id, str)
++        else None
++    )
++    stream_biz_url = resource.get("streamBizUrl")
++    if not isinstance(stream_biz_url, str) or not stream_biz_url:
++        stream_biz_url = (
++            channel_info.get("streamBizUrl")
++            if isinstance(channel_info, dict)
++            else ""
++        )
++    if isinstance(stream_biz_url, str) and stream_biz_url:
++        resource = {**resource, "streamBizUrl": stream_biz_url}
++    is_ys7 = _is_ys7_client(client)
++    if is_ys7:
++        vtdu_token = get_player_token(
++            client,
++            count=max(100, token_index + 1),
++            token_index=token_index,
++        )
++    else:
++        tokens = get_vtdu_token_v2(client).get("tokens", [])
++        try:
++            vtdu_token = tokens[token_index]
++        except IndexError as err:
++            raise PyEzvizError(f"VTDU token index out of range: {token_index}") from err
++        if not isinstance(vtdu_token, str):
++            raise PyEzvizError(f"Invalid VTDU token at index {token_index}")
+ 
+     stream_channel = channel
+     if stream_channel is None:
+@@ -177,10 +255,11 @@ def get_cloud_stream_info(
+         host.strip(),
+         port,
+         serial,
+-        str(resource.get("streamBizUrl") or ""),
++        str(stream_biz_url or ""),
+         vtdu_token,
+         channel=stream_channel,
+         client_type=client_type,
++        native_layout=is_ys7,
+     )
+     return {
+         "resource": resource,
+@@ -216,13 +295,26 @@ def open_cloud_stream(
+         token_index=token_index,
+         refresh_vtm=refresh_vtm,
+     )
+-    if socket_factory is None:
+-        return VtmStreamClient(info["stream_url"], timeout=timeout)
+-    return VtmStreamClient(
+-        info["stream_url"],
+-        timeout=timeout,
+-        socket_factory=socket_factory,
+-    )
++    stream_options: dict[str, Any] = {"timeout": timeout}
++    if _is_ys7_client(client):
++        saved = getattr(client, "_token", {})
++        saved = saved if isinstance(saved, dict) else {}
++        hardware_code = (
++            saved.get("hardware_code")
++            or saved.get("feature_code")
++            or saved.get("featureCode")
++            or FEATURE_CODE
++        )
++        stream_options.update(
++            client_version="3.0.5.20180912",
++            pds_string=f"hdSign={hardware_code}",
++            initial_sequence=1,
++            preserve_request_url_on_redirect=True,
++            stop_on_close=True,
++        )
++    if socket_factory is not None:
++        stream_options["socket_factory"] = socket_factory
++    return VtmStreamClient(info["stream_url"], **stream_options)
+ 
+ 
+ def parse_vtm_server_public_key(vtm: JsonDict) -> VtmServerPublicKey | None:
+@@ -276,6 +368,35 @@ def _find_vtm_resource(
+     )
+ 
+ 
++def _is_ys7_client(client: Any) -> bool:
++    token = getattr(client, "_token", {})
++    api_url = token.get("api_url") if isinstance(token, dict) else None
++    candidate = str(api_url or "").strip()
++    parsed = urlparse(candidate if "://" in candidate else f"https://{candidate}")
++    return (parsed.hostname or "").lower() == "api.ys7.com"
++
++
++def _retry_network_json(
++    request: Callable[[], JsonDict],
++    *,
++    operation: str,
++    attempts: int = 3,
++) -> JsonDict:
++    """Retry short-lived transport failures without exposing request secrets."""
++
++    for attempt in range(attempts):
++        try:
++            return cast(JsonDict, request())
++        except requests.RequestException as err:
++            if attempt + 1 >= attempts:
++                raise PyEzvizError(
++                    f"{operation} failed after {attempts} attempts: "
++                    f"{type(err).__name__}"
++                ) from err
++            time.sleep(0.25 * (attempt + 1))
++    raise AssertionError("network retry loop exited unexpectedly")
++
++
+ def _http_status_code(err: HTTPError) -> int | None:
+     cause = err.__cause__
+     response = getattr(cause, "response", None)
+diff --git a/pyezvizapi/stream.py b/pyezvizapi/stream.py
+index 74a46f8..000557e 100644
+--- a/pyezvizapi/stream.py
++++ b/pyezvizapi/stream.py
+@@ -13,7 +13,8 @@ import ssl
+ import struct
+ import time
+ from typing import Any
+-from urllib.parse import parse_qsl, urlencode, urlparse
++import uuid
++from urllib.parse import parse_qsl, unquote_plus, urlencode, urlparse
+ 
+ from Crypto.Cipher import AES
+ 
+@@ -70,6 +71,8 @@ class VtmChannel(IntEnum):
+ class VtmMessageCode(IntEnum):
+     """Known VTM/VTDU message codes."""
+ 
++    STOP_STREAM_REQ = 0x130
++    STOP_STREAM_RSP = 0x131
+     KEEPALIVE_REQ = 0x132
+     KEEPALIVE_RSP = 0x133
+     STREAMINFO_REQ = 0x13B
+@@ -194,15 +197,28 @@ class VtmStreamClient:
+         *,
+         timeout: float | None = 10.0,
+         client_version: str = "v3.6.3.20221124",
++        include_user_agent: bool = True,
++        include_empty_pds: bool = False,
++        pds_string: str | None = None,
++        initial_sequence: int = 0,
++        preserve_request_url_on_redirect: bool = False,
++        stop_on_close: bool = False,
+         socket_factory: SocketFactory = socket.create_connection,
+     ) -> None:
+         self.stream_url = stream_url
+         self.timeout = timeout
+         self.client_version = client_version
++        self.include_user_agent = include_user_agent
++        self.include_empty_pds = include_empty_pds
++        self.pds_string = pds_string
++        self.preserve_request_url_on_redirect = preserve_request_url_on_redirect
++        self.stop_on_close = stop_on_close
+         self._socket_factory = socket_factory
+         self._socket: Any | None = None
+-        self._sequence = 0
++        self._sequence = initial_sequence & 0xFFFF
++        self._stop_sent = False
+         self.stream_info: StreamInfoResponse | None = None
++        self.stop_response: StopStreamResponse | None = None
+ 
+     def __enter__(self) -> VtmStreamClient:
+         """Open the TCP connection when used as a context manager."""
+@@ -236,8 +252,13 @@ class VtmStreamClient:
+         """Close the VTM TCP connection."""
+ 
+         sock = self._socket
+-        self._socket = None
+         if sock is not None:
++            if self.stop_on_close:
++                try:
++                    self.stop(wait_for_response=True)
++                except (OSError, PyEzvizError):
++                    pass
++            self._socket = None
+             sock.close()
+ 
+     def send_packet(
+@@ -284,12 +305,20 @@ class VtmStreamClient:
+         """Request stream info and return the decoded ``StreamInfoRsp``."""
+ 
+         redirect_count = 0
++        original_stream_url = self.stream_url
+         while True:
+             self.connect()
+             request = build_stream_info_request(
+-                self.stream_url,
++                (
++                    original_stream_url
++                    if self.preserve_request_url_on_redirect
++                    else self.stream_url
++                ),
+                 vtm_stream_key=vtm_stream_key,
+                 client_version=self.client_version,
++                include_user_agent=self.include_user_agent,
++                include_empty_pds=self.include_empty_pds,
++                pds_string=self.pds_string,
+             )
+             self.send_packet(request)
+ 
+@@ -314,6 +343,43 @@ class VtmStreamClient:
+             else:
+                 raise PyEzvizError("Timed out waiting for VTM stream info response")
+ 
++    def stop(
++        self,
++        *,
++        wait_for_response: bool = False,
++        max_control_packets: int = 20,
++    ) -> int | None:
++        """Request release of the active VTM stream session when available."""
++
++        info = self.stream_info
++        if (
++            self._stop_sent
++            or info is None
++            or info.result not in (None, 0)
++            or not info.streamssn
++        ):
++            return None
++        sequence = self.send_packet(
++            build_stop_stream_request(info.streamssn),
++            message_code=VtmMessageCode.STOP_STREAM_REQ,
++        )
++        self._stop_sent = True
++        if wait_for_response:
++            sock = self._require_socket()
++            stop_timeout = 2.0 if self.timeout is None else min(self.timeout, 2.0)
++            sock.settimeout(stop_timeout)
++            try:
++                for _ in range(max_control_packets):
++                    packet = self.read_packet()
++                    if packet.message_code == VtmMessageCode.STOP_STREAM_RSP:
++                        self.stop_response = parse_stop_stream_response(packet.body)
++                        break
++                else:
++                    raise PyEzvizError("Timed out waiting for VTM stop response")
++            finally:
++                sock.settimeout(self.timeout)
++        return sequence
++
+     def send_keepalive(
+         self,
+         stream_ssn: str | None = None,
+@@ -359,6 +425,9 @@ class VtmStreamClient:
+                 last_keepalive = monotonic()
+ 
+             packet = self.read_packet()
++            if packet.message_code == VtmMessageCode.STOP_STREAM_RSP:
++                self.stop_response = parse_stop_stream_response(packet.body)
++                return
+             if packet.message_code == VtmMessageCode.KEEPALIVE_REQ:
+                 self.send_keepalive(message_code=VtmMessageCode.KEEPALIVE_RSP)
+                 last_keepalive = monotonic()
+@@ -403,12 +472,20 @@ class VtmStreamClient:
+ 
+         events: list[VtmTraceEvent] = []
+         redirect_count = 0
++        original_stream_url = self.stream_url
+         while len(events) < max_packets:
+             self.connect()
+             request = build_stream_info_request(
+-                self.stream_url,
++                (
++                    original_stream_url
++                    if self.preserve_request_url_on_redirect
++                    else self.stream_url
++                ),
+                 vtm_stream_key=vtm_stream_key,
+                 client_version=self.client_version,
++                include_user_agent=self.include_user_agent,
++                include_empty_pds=self.include_empty_pds,
++                pds_string=self.pds_string,
+             )
+             self.send_packet(request)
+ 
+@@ -559,25 +636,64 @@ def build_vtm_url(
+     channel: int = 1,
+     client_type: int = 9,
+     timestamp_ms: int | None = None,
++    lifecycle_id: str | None = None,
++    native_layout: bool = False,
+ ) -> str:
+     """Build the ysproto live URL used for the VTM stream-info request."""
+ 
+     if timestamp_ms is None:
+         timestamp_ms = int(time.time() * 1000)
+-    biz = _parse_stream_biz_params(stream_biz_url)
+-    params = {
+-        **biz,
+-        "dev": serial,
+-        "chn": str(channel),
+-        "stream": "1",
+-        "cln": str(client_type),
+-        "isp": "0",
+-        "auth": "1",
+-        "ssn": vtdu_token,
+-        "vip": "0",
+-        "timestamp": str(timestamp_ms),
++    parsed_biz = urlparse(stream_biz_url)
++    biz_query = _filter_vtm_biz_query(
++        parsed_biz.query or stream_biz_url.lstrip("?")
++    )
++    leading = urlencode(
++        (
++            ("dev", serial),
++            ("chn", str(channel)),
++            ("stream", "1"),
++            ("cln", str(client_type)),
++            ("isp", "0"),
++            ("auth", "1"),
++            ("ssn", vtdu_token),
++        )
++    )
++    if native_layout:
++        lifecycle_id = lifecycle_id or str(uuid.uuid4())
++        native_trailing = urlencode(
++            (("uuid", lifecycle_id), ("timestamp", str(timestamp_ms)))
++        )
++        query = "&".join(
++            part for part in (leading, native_trailing, biz_query) if part
++        )
++    else:
++        trailing = urlencode((("vip", "0"), ("timestamp", str(timestamp_ms))))
++        query = "&".join(part for part in (leading, biz_query, trailing) if part)
++    return f"ysproto://{_format_url_host(host)}:{port}/live?{query}"
++
++
++def _filter_vtm_biz_query(query: str) -> str:
++    """Keep signed business fields while excluding transport-owned fields."""
++
++    reserved = {
++        "dev",
++        "chn",
++        "stream",
++        "cln",
++        "isp",
++        "auth",
++        "ssn",
++        "weakstream",
++        "isretry",
++        "uuid",
++        "vip",
++        "timestamp",
+     }
+-    return f"ysproto://{_format_url_host(host)}:{port}/live?{urlencode(params)}"
++    return "&".join(
++        item
++        for item in query.split("&")
++        if item and unquote_plus(item.partition("=")[0]) not in reserved
++    )
+ 
+ 
+ def parse_vtm_url(url: str) -> tuple[str, int, str, dict[str, str]]:
+@@ -608,19 +724,25 @@ def build_stream_info_request(
+     *,
+     vtm_stream_key: str | None = None,
+     client_version: str = "v3.6.3.20221124",
++    include_user_agent: bool = True,
++    include_empty_pds: bool = False,
++    pds_string: str | None = None,
+ ) -> bytes:
+     """Encode the limited StreamInfoReq protobuf used by VTM/VTDU."""
+ 
+     parts = [_proto_string(1, stream_url)]
+     if vtm_stream_key:
+         parts.append(_proto_string(2, vtm_stream_key))
+-    parts.extend(
+-        (
+-            _proto_string(3, client_version),
+-            _proto_varint(4, 0),
+-            _proto_string(6, client_version),
+-        )
+-    )
++    if include_user_agent:
++        parts.append(_proto_string(3, client_version))
++    parts.append(_proto_varint(4, 0))
++    if pds_string is not None:
++        parts.append(_proto_string(5, pds_string))
++    elif include_empty_pds:
++        # The official native client explicitly marks pdsstring as present even
++        # when its std::string value is empty.
++        parts.append(_proto_string(5, ""))
++    parts.append(_proto_string(6, client_version))
+     return b"".join(parts)
+ 
+ 

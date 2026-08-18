@@ -1,0 +1,39 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/AlexxIT/go2rtc/v1.9.14/www/schema.json
+
+# Linux CB2 bridge: EZVIZ API/CAS is control-plane only. The media source is a
+# reverse TCP connection from the exact private address in EZVIZ_CAMERA_IP.
+app:
+  modules: [api, http, rtsp, homekit, exec, ffmpeg, srtp]
+
+api:
+  listen: ":1984"
+  allow_paths: ["/pair-setup", "/pair-verify"]
+
+rtsp:
+  listen: "127.0.0.1:8554"
+
+srtp:
+  listen: ":8443"
+
+exec:
+  allow_paths:
+    - "/usr/local/bin/python3"
+    - "/usr/bin/ffmpeg"
+
+ffmpeg:
+  bin: "/usr/bin/ffmpeg"
+
+streams:
+  ezviz:
+    - "exec:/usr/local/bin/python3 /app/scripts/probe-ezviz-direct-reverse.py --serial=${EZVIZ_SERIAL} --token-file=/data/ezviz_token.json --camera-ip=${EZVIZ_CAMERA_IP} --listen-ip=${EZVIZ_LISTEN_IP} --port=${EZVIZ_CALLBACK_PORT:39000} --stream-type=1 --media-seconds=0 --output-format=mpegts --ffmpeg-bin=/usr/bin/ffmpeg --strict-camera-ip --deny-internet-after-connect#killsignal=15#killtimeout=5"
+    - "ffmpeg:ezviz#video=h264${EZVIZ_HARDWARE_FRAGMENT}#raw=-r 15"
+    - "ffmpeg:ezviz#audio=opus"
+
+homekit:
+  ezviz:
+    name: "${HOMEKIT_NAME:EZVIZ CB2}"
+    pin: "__HOMEKIT_PIN__"
+
+log:
+  level: info
+  ffmpeg: error

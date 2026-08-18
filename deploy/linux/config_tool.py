@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Initialise and migrate sensitive go2rtc state without exposing it."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import stat
+import sys
+
+
+PIN_MARKER = "__HOMEKIT_PIN__"
+INSECURE_PINS = {
+    "00000000",
+    "11111111",
+    "22222222",
+    "33333333",
+    "44444444",
+    "55555555",
+    "66666666",
+    "77777777",
+    "88888888",
+    "99999999",
+    "12345678",
+    "87654321",
+}
+TOP_LEVEL_SECTION = re.compile(r"(?m)^(?P<name>[A-Za-z0-9_-]+):(?:[ \t].*)?$")
+PIN_LINE = re.compile(r"(?m)^[ \t]{4}pin:[ \t]*[\"']?([0-9-]{8,10})")
+
+
+def _arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init = subparsers.add_parser("init")
+    init.add_argument("--template", type=Path, required=True)
+    init.add_argument("--target", type=Path, required=True)
+
+    show_pin = subparsers.add_parser("show-pin")
+    show_pin.add_argument("--config", type=Path, required=True)
+
+    migrate = subparsers.add_parser("import-state")
+    migrate.add_argument("--template", type=Path, required=True)
+    migrate.add_argument("--source-config", type=Path, required=True)
+    migrate.add_argument("--source-token", type=Path, required=True)
+    migrate.add_argument("--target-config", type=Path, required=True)
+    migrate.add_argument("--target-token", type=Path, required=True)
+
+    return parser.parse_args()
+
+
+def _new_pin() -> str:
+    while True:
+        compact = f"{secrets.randbelow(100_000_000):08d}"
+        if compact not in INSECURE_PINS:
+            return f"{compact[:3]}-{compact[3:5]}-{compact[5:]}"
+
+
+def _secure_write(path: Path, data: bytes) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    temporary = path.with_name(f".{path.name}.tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    except BaseException:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _render_new_config(template: Path) -> str:
+    text = template.read_text(encoding="utf-8")
+    if text.count(PIN_MARKER) != 1:
+        raise RuntimeError("Config template must contain exactly one PIN marker")
+    return text.replace(PIN_MARKER, _new_pin())
+
+
+def _section(text: str, name: str) -> str:
+    matches = list(TOP_LEVEL_SECTION.finditer(text))
+    for index, match in enumerate(matches):
+        if match.group("name") != name:
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        return text[match.start() : end].rstrip() + "\n\n"
+    raise RuntimeError(f"Config does not contain a top-level {name!r} section")
+
+
+def _replace_section(text: str, name: str, replacement: str) -> str:
+    current = _section(text, name)
+    return text.replace(current, replacement, 1)
+
+
+def _validate_token(path: Path) -> bytes:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & 0o077:
+        raise RuntimeError(
+            f"Source token permissions must be 0600, currently {mode:03o}"
+        )
+    raw = path.read_bytes()
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise RuntimeError("Source token must contain a JSON object")
+    return raw
+
+
+def _init(template: Path, target: Path) -> None:
+    if target.exists():
+        raise RuntimeError(f"Refusing to overwrite existing config: {target}")
+    _secure_write(target, _render_new_config(template).encode())
+
+
+def _show_pin(config: Path) -> None:
+    match = PIN_LINE.search(config.read_text(encoding="utf-8"))
+    if match is None:
+        raise RuntimeError("HomeKit PIN was not found in the persistent config")
+    print(match.group(1))
+
+
+def _import_state(args: argparse.Namespace) -> None:
+    if args.target_config.exists() or args.target_token.exists():
+        raise RuntimeError(
+            "Refusing to overwrite existing Linux state; import into an empty data directory"
+        )
+
+    source_config = args.source_config.read_text(encoding="utf-8")
+    homekit = _section(source_config, "homekit")
+    if PIN_LINE.search(homekit) is None:
+        raise RuntimeError("Source config does not contain a HomeKit PIN")
+    token = _validate_token(args.source_token)
+
+    target_config = _render_new_config(args.template)
+    target_config = _replace_section(target_config, "homekit", homekit)
+    _secure_write(args.target_config, target_config.encode())
+    try:
+        _secure_write(args.target_token, token)
+    except BaseException:
+        args.target_config.unlink(missing_ok=True)
+        raise
+
+
+def main() -> int:
+    args = _arguments()
+    try:
+        if args.command == "init":
+            _init(args.template, args.target)
+        elif args.command == "show-pin":
+            _show_pin(args.config)
+        elif args.command == "import-state":
+            _import_state(args)
+        else:
+            raise RuntimeError(f"Unsupported command: {args.command}")
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as error:
+        print(f"状态操作失败：{error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

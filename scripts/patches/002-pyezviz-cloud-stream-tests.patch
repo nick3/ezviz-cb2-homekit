@@ -1,0 +1,728 @@
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index 6b5ff65..24fcf09 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -16,7 +16,7 @@ from cli_fakes import (
+ 
+ import pyezvizapi.__main__ as cli_module
+ from pyezvizapi.exceptions import EzvizAuthVerificationCode, PyEzvizError
+-from pyezvizapi.stream import VtmChannel, VtmPacket
++from pyezvizapi.stream import StreamInfoResponse, VtmChannel, VtmPacket
+ 
+ MPEGTS_PAYLOAD = b"mpegts"
+ CLOUD_VIDEO_PAYLOAD = b"cloud-video-bytes"
+@@ -1703,6 +1703,7 @@ def test_stream_dump_rejects_encrypted_packets_by_default(monkeypatch, tmp_path,
+ 
+ def test_remux_stream_payloads_to_mpegts_pipes_payloads(tmp_path) -> None:
+     expected_payload = b"abcdef"
++    stop_calls: list[bool] = []
+     fake_ffmpeg = tmp_path / "fake-ffmpeg"
+     fake_ffmpeg.write_text(
+         "#!/usr/bin/env python3\nimport sys\nsys.stdout.buffer.write(sys.stdin.buffer.read())\n",
+@@ -1711,6 +1712,9 @@ def test_remux_stream_payloads_to_mpegts_pipes_payloads(tmp_path) -> None:
+     fake_ffmpeg.chmod(0o755)
+ 
+     class FakeStream:
++        def stop(self, *, wait_for_response: bool = True) -> None:
++            stop_calls.append(wait_for_response)
++
+         def iter_packets(self, *, max_packets: int | None = None) -> list[VtmPacket]:
+             assert max_packets == 2
+             return [
+@@ -1742,6 +1746,7 @@ def test_remux_stream_payloads_to_mpegts_pipes_payloads(tmp_path) -> None:
+     )
+ 
+     assert output.getvalue() == expected_payload
++    assert stop_calls == [False]
+ 
+ 
+ def test_remux_stream_payloads_to_mpegts_wraps_ffmpeg_launch_failure() -> None:
+@@ -2728,8 +2733,20 @@ def test_stream_proxy_sends_error_when_ffmpeg_fails_before_headers(monkeypatch)
+         def __exit__(self, *_args: object) -> None:
+             return None
+ 
+-        def start(self) -> None:
+-            return None
++        def start(self) -> StreamInfoResponse:
++            return StreamInfoResponse(result=0, streamssn="session-1")
++
++        def iter_packets(self, *, max_packets: int | None = None) -> list[VtmPacket]:
++            assert max_packets == 6
++            return [
++                VtmPacket(
++                    channel=VtmChannel.STREAM,
++                    length=8,
++                    sequence=1,
++                    message_code=0,
++                    body=b"\x00\x00\x01\xba-media",
++                )
++            ] * 6
+ 
+     class FakeHandler:
+         path = "/CAM123.ts"
+@@ -2781,6 +2798,199 @@ def test_stream_proxy_sends_error_when_ffmpeg_fails_before_headers(monkeypatch)
+     assert handler.errors == [(502, "Could not launch FFmpeg")]
+ 
+ 
++def test_stream_proxy_retries_stream_start_before_response(monkeypatch) -> None:
++    class FakeStream:
++        def __init__(self, *, fail: bool) -> None:
++            self.fail = fail
++            self.entered = False
++            self.closed = False
++
++        def __enter__(self) -> FakeStream:
++            self.entered = True
++            return self
++
++        def __exit__(self, *_args: object) -> None:
++            self.closed = True
++
++        def start(self) -> StreamInfoResponse:
++            if self.fail:
++                raise PyEzvizError("VTM socket closed while reading packet")
++            return StreamInfoResponse(result=0, streamssn="session-1")
++
++        def iter_packets(self, *, max_packets: int | None = None) -> list[VtmPacket]:
++            assert max_packets == 6
++            return [
++                VtmPacket(
++                    channel=VtmChannel.STREAM,
++                    length=8,
++                    sequence=1,
++                    message_code=0,
++                    body=b"\x00\x00\x01\xba-media",
++                )
++            ] * 6
++
++    streams = [FakeStream(fail=True), FakeStream(fail=False)]
++    sleeps: list[float] = []
++    monkeypatch.setattr(
++        cli_module,
++        "open_cloud_stream",
++        lambda *_args, **_kwargs: streams.pop(0),
++    )
++    monkeypatch.setattr(cli_module.time, "sleep", lambda value: sleeps.append(value))
++    config = cli_module.StreamProxyConfig(
++        serial="CAM123",
++        channel=1,
++        client_type=3,
++        token_index=0,
++        refresh_vtm=False,
++        timeout=30,
++        path="/CAM123.ts",
++        ffmpeg_path="ffmpeg",
++        allow_encrypted=False,
++        decrypt_video=False,
++        decrypt_codec="auto",
++        max_packets=None,
++    )
++
++    stream = cli_module._open_started_proxy_stream(config, cast(Any, object()))  # noqa: SLF001
++
++    assert stream.entered is True
++    assert stream.closed is False
++    assert sleeps == [1.0]
++
++
++def test_stream_proxy_retries_rejected_session_before_media(monkeypatch) -> None:
++    class FakeStream:
++        def __init__(self, response: StreamInfoResponse) -> None:
++            self.response = response
++            self.closed = False
++
++        def __enter__(self) -> FakeStream:
++            return self
++
++        def __exit__(self, *_args: object) -> None:
++            self.closed = True
++
++        def start(self) -> StreamInfoResponse:
++            return self.response
++
++        def iter_packets(self, *, max_packets: int | None = None) -> list[VtmPacket]:
++            assert max_packets == 6
++            return [
++                VtmPacket(
++                    channel=VtmChannel.STREAM,
++                    length=8,
++                    sequence=1,
++                    message_code=0,
++                    body=b"\x00\x00\x01\xba-media",
++                )
++            ] * 6
++
++    rejected = FakeStream(StreamInfoResponse(result=5452))
++    accepted = FakeStream(StreamInfoResponse(result=0, streamssn="session-2"))
++    streams = [rejected, accepted]
++    sleeps: list[float] = []
++    monkeypatch.setattr(
++        cli_module,
++        "open_cloud_stream",
++        lambda *_args, **_kwargs: streams.pop(0),
++    )
++    monkeypatch.setattr(cli_module.time, "sleep", lambda value: sleeps.append(value))
++    config = cli_module.StreamProxyConfig(
++        serial="CAM123",
++        channel=1,
++        client_type=3,
++        token_index=0,
++        refresh_vtm=False,
++        timeout=30,
++        path="/CAM123.ts",
++        ffmpeg_path="ffmpeg",
++        allow_encrypted=False,
++        decrypt_video=False,
++        decrypt_codec="auto",
++        max_packets=None,
++    )
++
++    stream = cli_module._open_started_proxy_stream(  # noqa: SLF001
++        config,
++        cast(Any, object()),
++        attempts=2,
++    )
++
++    assert rejected.closed is True
++    assert accepted.closed is False
++    assert sleeps == [1.0]
++    assert [packet.body for packet in stream.iter_packets(max_packets=1)] == [
++        b"\x00\x00\x01\xba-media"
++    ]
++
++
++def test_stream_proxy_retries_when_session_closes_before_media(monkeypatch) -> None:
++    class FakeStream:
++        def __init__(self, *, closes_early: bool) -> None:
++            self.closes_early = closes_early
++            self.closed = False
++
++        def __enter__(self) -> FakeStream:
++            return self
++
++        def __exit__(self, *_args: object) -> None:
++            self.closed = True
++
++        def start(self) -> StreamInfoResponse:
++            return StreamInfoResponse(result=0, streamssn="session")
++
++        def iter_packets(self, *, max_packets: int | None = None) -> list[VtmPacket]:
++            assert max_packets == 6
++            if self.closes_early:
++                raise PyEzvizError("VTM socket closed while reading packet")
++            return [
++                VtmPacket(
++                    channel=VtmChannel.STREAM,
++                    length=8,
++                    sequence=1,
++                    message_code=0,
++                    body=b"\x00\x00\x01\xba-media",
++                )
++            ] * 6
++
++    closed = FakeStream(closes_early=True)
++    ready = FakeStream(closes_early=False)
++    streams = [closed, ready]
++    monkeypatch.setattr(
++        cli_module,
++        "open_cloud_stream",
++        lambda *_args, **_kwargs: streams.pop(0),
++    )
++    monkeypatch.setattr(cli_module.time, "sleep", lambda _value: None)
++    config = cli_module.StreamProxyConfig(
++        serial="CAM123",
++        channel=1,
++        client_type=3,
++        token_index=0,
++        refresh_vtm=False,
++        timeout=30,
++        path="/CAM123.ts",
++        ffmpeg_path="ffmpeg",
++        allow_encrypted=False,
++        decrypt_video=False,
++        decrypt_codec="auto",
++        max_packets=None,
++    )
++
++    stream = cli_module._open_started_proxy_stream(  # noqa: SLF001
++        config,
++        cast(Any, object()),
++        attempts=2,
++    )
++
++    assert closed.closed is True
++    assert ready.closed is False
++    assert [packet.body for packet in stream.iter_packets(max_packets=1)] == [
++        b"\x00\x00\x01\xba-media"
++    ]
++
++
+ def test_stream_proxy_can_decrypt_payloads_before_remux(monkeypatch) -> None:
+     class FakeStream:
+         def __enter__(self) -> FakeStream:
+@@ -2789,8 +2999,20 @@ def test_stream_proxy_can_decrypt_payloads_before_remux(monkeypatch) -> None:
+         def __exit__(self, *_args: object) -> None:
+             return None
+ 
+-        def start(self) -> None:
+-            return None
++        def start(self) -> StreamInfoResponse:
++            return StreamInfoResponse(result=0, streamssn="session-1")
++
++        def iter_packets(self, *, max_packets: int | None = None) -> list[VtmPacket]:
++            assert max_packets == 6
++            return [
++                VtmPacket(
++                    channel=VtmChannel.STREAM,
++                    length=8,
++                    sequence=1,
++                    message_code=0,
++                    body=b"\x00\x00\x01\xba-media",
++                )
++            ] * 6
+ 
+     class FakeClient:
+         def get_cam_key(self, serial: str, *, max_retries: int = 0) -> str:
+diff --git a/tests/test_stream.py b/tests/test_stream.py
+index 110ddb5..20349b8 100644
+--- a/tests/test_stream.py
++++ b/tests/test_stream.py
+@@ -4,6 +4,7 @@ import base64
+ import importlib
+ import json
+ from typing import Any
++from urllib.parse import parse_qsl, urlsplit
+ 
+ from Crypto.Cipher import AES
+ import pytest
+@@ -13,8 +14,10 @@ import pyezvizapi
+ from pyezvizapi.client import EzvizClient
+ from pyezvizapi.cloud_stream import (
+     get_cloud_stream_info,
++    get_player_token,
+     get_vtdu_token_v2,
+     get_vtm_info,
++    get_vtm_page_list,
+     open_cloud_stream,
+ )
+ from pyezvizapi.exceptions import DeviceException, HTTPError, PyEzvizError
+@@ -304,10 +307,15 @@ def test_stream_info_protobuf_helpers_decode_known_fields() -> None:
+     assert decoded.srvipv6_addr == "::1"
+ 
+     req = build_stream_info_request(STREAM_URL.decode(), vtm_stream_key=STREAM_KEY.decode())
++    ticket_req = build_stream_info_request(
++        STREAM_URL.decode(),
++        pds_string="camera-ticket",
++    )
+     keepalive = build_stream_keepalive_request("ssn-123")
+ 
+     assert STREAM_URL in req
+     assert STREAM_KEY in req
++    assert b"\x2a\x0dcamera-ticket" in ticket_req
+     assert keepalive == KEEPALIVE_REQ
+ 
+ 
+@@ -1812,6 +1820,165 @@ def test_vtm_stream_client_start_follows_redirect_response() -> None:
+     assert redirect_key.encode() in second_packets[0].body
+ 
+ 
++def test_vtm_stream_client_can_repeat_original_url_with_native_request_shape() -> None:
++    original_url = "ysproto://vtm.example.test:8554/live?dev=CAM123&ssn=token-1"
++    redirect_url = "ysproto://redirect.example.test:6000/live?dev=CAM123"
++    redirect_key = "redirect-key"
++    redirect_body = (
++        b"\x08\xb6\x29"
++        + b"\x2a"
++        + bytes([len(redirect_key)])
++        + redirect_key.encode()
++        + b"\x3a"
++        + bytes([len(redirect_url)])
++        + redirect_url.encode()
++    )
++    success_body = b"\x08\x00\x22\x07ssn-123"
++    sockets = [
++        FakeVtmSocket(
++            [
++                encode_vtm_packet(
++                    redirect_body,
++                    message_code=VtmMessageCode.STREAMINFO_RSP,
++                    sequence=7,
++                )
++            ]
++        ),
++        FakeVtmSocket(
++            [
++                encode_vtm_packet(
++                    success_body,
++                    message_code=VtmMessageCode.STREAMINFO_RSP,
++                    sequence=8,
++                )
++            ]
++        ),
++    ]
++    calls: list[tuple[str, int]] = []
++
++    def socket_factory(
++        address: tuple[str, int],
++        _timeout: float | None,
++    ) -> FakeVtmSocket:
++        calls.append(address)
++        return sockets[len(calls) - 1]
++
++    with VtmStreamClient(
++        original_url,
++        client_version="3.0.5.20180912",
++        include_empty_pds=True,
++        initial_sequence=1,
++        preserve_request_url_on_redirect=True,
++        socket_factory=socket_factory,
++    ) as stream:
++        info = stream.start()
++
++    first_request = _decode_sent_packets(sockets[0].sent)[0]
++    second_request = _decode_sent_packets(sockets[1].sent)[0]
++
++    assert calls == [
++        ("vtm.example.test", 8554),
++        ("redirect.example.test", 6000),
++    ]
++    assert first_request.sequence == 1
++    assert second_request.sequence == 2
++    assert original_url.encode() in second_request.body
++    assert redirect_url.encode() not in second_request.body
++    assert redirect_key.encode() in second_request.body
++    assert second_request.body.count(b"3.0.5.20180912") == 2
++    assert b"\x2a\x00" in second_request.body
++    assert info.result == 0
++
++
++def test_vtm_stream_client_sends_hardware_signature_in_native_request() -> None:
++    success_body = b"\x08\x00\x22\x07ssn-123"
++    fake_socket = FakeVtmSocket(
++        [
++            encode_vtm_packet(
++                success_body,
++                message_code=VtmMessageCode.STREAMINFO_RSP,
++                sequence=1,
++            )
++        ]
++    )
++
++    with VtmStreamClient(
++        "ysproto://vtm.example.test:8554/live?dev=CAM123",
++        pds_string="hdSign=feature-1",
++        socket_factory=lambda _address, _timeout: fake_socket,
++    ) as stream:
++        stream.start()
++
++    request = _decode_sent_packets(fake_socket.sent)[0]
++
++    assert b"hdSign=feature-1" in request.body
++
++
++def test_vtm_stream_client_sends_stop_request_when_configured() -> None:
++    success_body = b"\x08\x00\x22\x07ssn-123"
++    stop_body = b"\x08\x00"
++    fake_socket = FakeVtmSocket(
++        [
++            encode_vtm_packet(
++                success_body,
++                message_code=VtmMessageCode.STREAMINFO_RSP,
++                sequence=1,
++            ),
++            encode_vtm_packet(
++                stop_body,
++                message_code=VtmMessageCode.STOP_STREAM_RSP,
++                sequence=2,
++            ),
++        ]
++    )
++
++    with VtmStreamClient(
++        "ysproto://vtm.example.test:8554/live?dev=CAM123",
++        stop_on_close=True,
++        socket_factory=lambda _address, _timeout: fake_socket,
++    ) as stream:
++        stream.start()
++
++    sent = _decode_sent_packets(fake_socket.sent)
++
++    assert [packet.message_code for packet in sent] == [
++        VtmMessageCode.STREAMINFO_REQ,
++        VtmMessageCode.STOP_STREAM_REQ,
++    ]
++    assert sent[-1].body == build_stop_stream_request("ssn-123")
++    assert stream.stop_response is not None
++    assert stream.stop_response.result == 0
++
++
++def test_vtm_packet_iterator_finishes_when_stop_is_acknowledged() -> None:
++    stream_body = b"\x00\x00\x01\xba-media"
++    fake_socket = FakeVtmSocket(
++        [
++            encode_vtm_packet(
++                stream_body,
++                channel=VtmChannel.STREAM,
++                message_code=0,
++                sequence=2,
++            ),
++            encode_vtm_packet(
++                b"\x08\x00",
++                message_code=VtmMessageCode.STOP_STREAM_RSP,
++                sequence=3,
++            ),
++        ]
++    )
++    stream = VtmStreamClient(
++        "ysproto://vtm.example.test:8554/live?dev=CAM123",
++        socket_factory=lambda _address, _timeout: fake_socket,
++    ).connect()
++
++    packets = list(stream.iter_packets())
++
++    assert [packet.body for packet in packets] == [stream_body]
++    assert stream.stop_response is not None
++    assert stream.stop_response.result == 0
++
++
+ def test_vtm_stream_client_traces_sanitized_packet_metadata() -> None:
+     stream_info_body = b"\x08\x00\x22\x07ssn-123\x2a\x05key-1"
+     responses = [
+@@ -2232,6 +2399,74 @@ def test_get_vtdu_token_v2_does_not_relogin_after_non_auth_error(monkeypatch) ->
+     assert login_calls == 0
+ 
+ 
++def test_get_player_token_uses_official_ys7_request_shape() -> None:
++    calls: list[dict[str, Any]] = []
++
++    class FakeClient:
++        _token = {
++            "session_id": "session-1",
++            "api_url": "api.ys7.com",
++            "feature_code": "feature-1",
++        }
++
++        def _request_json(
++            self,
++            method: str,
++            path: str,
++            **kwargs: Any,
++        ) -> dict[str, Any]:
++            calls.append({"method": method, "path": path, **kwargs})
++            return {
++                "resultCode": 0,
++                "tokenArray": ["player-token-1", "player-token-2"],
++            }
++
++    token = get_player_token(FakeClient(), count=100, token_index=1)
++
++    assert token == "player-token-2"
++    assert calls == [
++        {
++            "method": "POST",
++            "path": "/api/user/token/get",
++            "data": {
++                "sessionId": "session-1",
++                "clientType": "3",
++                "osVersion": "Android",
++                "clientVersion": "6.18.1.250717",
++                "netType": "WIFI",
++                "clientNo": "",
++                "clientName": "",
++                "count": "100",
++                "featureCode": "feature-1",
++            },
++            "retry_401": False,
++        }
++    ]
++
++
++def test_get_vtm_page_list_retries_transient_network_errors(monkeypatch) -> None:
++    attempts = 0
++    sleeps: list[float] = []
++
++    class FakeClient:
++        def _api_get_pagelist(self, **kwargs: Any) -> dict[str, Any]:
++            nonlocal attempts
++            attempts += 1
++            assert kwargs == {"page_filter": "VTM", "limit": 50}
++            if attempts < 3:
++                raise requests.exceptions.SSLError("temporary TLS EOF")
++            return {"resourceInfos": [], "VTM": {}}
++
++    monkeypatch.setattr(
++        "pyezvizapi.cloud_stream.time.sleep",
++        lambda seconds: sleeps.append(seconds),
++    )
++
++    assert get_vtm_page_list(FakeClient()) == {"resourceInfos": [], "VTM": {}}
++    assert attempts == 3
++    assert sleeps == [0.25, 0.5]
++
++
+ def test_get_vtm_info_uses_apk_discovered_endpoint() -> None:
+     calls: list[tuple[str, str]] = []
+ 
+@@ -2291,6 +2526,133 @@ def test_get_cloud_stream_info_builds_bootstrap(monkeypatch) -> None:
+     assert parse_vtm_url(info["stream_url"])[3]["chn"] == "2"
+ 
+ 
++def test_get_cloud_stream_info_uses_ys7_player_token_and_native_url(monkeypatch) -> None:
++    client = EzvizClient(
++        token={
++            "session_id": "session-1",
++            "api_url": "api.ys7.com",
++            "feature_code": "feature-1",
++        },
++        timeout=1,
++    )
++    token_calls: list[dict[str, int]] = []
++
++    monkeypatch.setattr(
++        "pyezvizapi.cloud_stream.get_vtm_page_list",
++        lambda _client: {
++            "resourceInfos": [
++                {
++                    "deviceSerial": "CAM123",
++                    "resourceId": "Video",
++                    "localIndex": "1",
++                    "streamBizUrl": (
++                        "biz=live&transfertype=1&ezdevpro=1&tags=a%2Fb"
++                    ),
++                }
++            ],
++            "VTM": {"Video": {"externalIp": "1.2.3.4", "port": 8554}},
++        },
++    )
++
++    def fake_player_token(
++        _client: Any,
++        *,
++        count: int,
++        token_index: int,
++    ) -> str:
++        token_calls.append({"count": count, "token_index": token_index})
++        return "player-token-1"
++
++    monkeypatch.setattr(
++        "pyezvizapi.cloud_stream.get_player_token",
++        fake_player_token,
++    )
++
++    info = get_cloud_stream_info(
++        client,
++        "CAM123",
++        channel=1,
++        client_type=3,
++        refresh_vtm=False,
++    )
++    query = urlsplit(info["stream_url"]).query
++    ordered_keys = [key for key, _value in parse_qsl(query, keep_blank_values=True)]
++    params = dict(parse_qsl(query, keep_blank_values=True))
++
++    assert token_calls == [{"count": 100, "token_index": 0}]
++    assert info["vtdu_token"] == "player-token-1"
++    assert ordered_keys == [
++        "dev",
++        "chn",
++        "stream",
++        "cln",
++        "isp",
++        "auth",
++        "ssn",
++        "uuid",
++        "timestamp",
++        "biz",
++        "transfertype",
++        "ezdevpro",
++        "tags",
++    ]
++    assert params["cln"] == "3"
++    assert params["ssn"] == "player-token-1"
++    assert params["uuid"]
++    assert "vip" not in params
++
++
++def test_get_cloud_stream_info_uses_channel_stream_biz_url(monkeypatch) -> None:
++    client = _client()
++
++    monkeypatch.setattr(
++        "pyezvizapi.cloud_stream.get_vtm_page_list",
++        lambda _client: {
++            "resourceInfos": [
++                {
++                    "deviceSerial": "CAM123",
++                    "resourceId": "Video",
++                    "localIndex": "1",
++                }
++            ],
++            "CHANNEL": {
++                "Video": {
++                    "streamBizUrl": "biz=live&transfertype=1&ezdevpro=1",
++                }
++            },
++            "VTM": {"Video": {"externalIp": "1.2.3.4", "port": 8554}},
++        },
++    )
++    monkeypatch.setattr(
++        "pyezvizapi.cloud_stream.get_vtdu_token_v2",
++        lambda _client: {"retcode": 0, "tokens": ["token-1"]},
++    )
++
++    info = get_cloud_stream_info(client, "CAM123", channel=1)
++
++    assert info["resource"]["streamBizUrl"] == (
++        "biz=live&transfertype=1&ezdevpro=1"
++    )
++    assert parse_vtm_url(info["stream_url"])[3]["biz"] == "live"
++
++
++def test_build_vtm_url_preserves_signed_parameter_order() -> None:
++    url = build_vtm_url(
++        "1.2.3.4",
++        8554,
++        "CAM123",
++        "biz=live&transfertype=1&tags=a%2Fb",
++        "token-1",
++        timestamp_ms=123,
++    )
++
++    assert url == (
++        "ysproto://1.2.3.4:8554/live?"
++        "dev=CAM123&chn=1&stream=1&cln=9&isp=0&auth=1&ssn=token-1&"
++        "biz=live&transfertype=1&tags=a%2Fb&vip=0&timestamp=123"
++    )
++
++
+ def test_get_cloud_stream_info_can_refresh_vtm_from_app_endpoint(monkeypatch) -> None:
+     client = _client()
+ 
+@@ -2342,6 +2704,28 @@ def test_open_cloud_stream_returns_unstarted_vtm_client(monkeypatch) -> None:
+     assert not stream.connected
+ 
+ 
++def test_open_cloud_stream_uses_ys7_hardware_signature(monkeypatch) -> None:
++    client = EzvizClient(
++        token={
++            "session_id": "session-1",
++            "api_url": "api.ys7.com",
++            "feature_code": "feature-1",
++        },
++        timeout=1,
++    )
++    monkeypatch.setattr(
++        "pyezvizapi.cloud_stream.get_cloud_stream_info",
++        lambda *_args, **_kwargs: {
++            "stream_url": "ysproto://vtm.example.test:8554/live?dev=CAM123"
++        },
++    )
++
++    stream = open_cloud_stream(client, "CAM123", timeout=3)
++
++    assert stream.pds_string == "hdSign=feature-1"
++    assert stream.stop_on_close is True
++
++
+ def test_get_cloud_stream_info_uses_requested_channel_resource(monkeypatch) -> None:
+     client = _client()
+ 

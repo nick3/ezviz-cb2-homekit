@@ -1,5 +1,8 @@
 .idea/
 .tmp/
+deploy/linux/.env
+deploy/linux/data/
+__pycache__/
 
 go2rtc.yaml
 go2rtc.json

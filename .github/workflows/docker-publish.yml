@@ -1,0 +1,155 @@
+name: Build and publish EZVIZ HomeKit image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ezviz-cb2-homekit
+  GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/ezviz-cb2-homekit
+
+jobs:
+  publish:
+    name: Build linux/amd64 and linux/arm64
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Check Docker Hub configuration
+        id: dockerhub
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        shell: bash
+        run: |
+          if [[ -n "$DOCKERHUB_USERNAME" && -n "$DOCKERHUB_TOKEN" ]]; then
+            echo "enabled=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Sign in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate GHCR tags and labels
+        id: meta-ghcr
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ${{ env.GHCR_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push to GHCR
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: deploy/linux/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-ghcr.outputs.tags }}
+          labels: ${{ steps.meta-ghcr.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Verify GHCR manifest
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: docker buildx imagetools inspect "${GHCR_IMAGE}@${IMAGE_DIGEST}" >/dev/null
+
+      - name: Sign in to Docker Hub
+        if: steps.dockerhub.outputs.enabled == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Generate Docker Hub tags
+        if: steps.dockerhub.outputs.enabled == 'true'
+        id: meta-dockerhub
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: docker.io/${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Mirror the same manifest to Docker Hub
+        if: steps.dockerhub.outputs.enabled == 'true'
+        env:
+          DOCKERHUB_TAGS: ${{ steps.meta-dockerhub.outputs.tags }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          mapfile -t tags <<<"$DOCKERHUB_TAGS"
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            [[ -n "$tag" ]] && tag_args+=(--tag "$tag")
+          done
+          docker buildx imagetools create \
+            "${tag_args[@]}" \
+            "${GHCR_IMAGE}@${IMAGE_DIGEST}"
+
+      - name: Verify Docker Hub manifest
+        if: steps.dockerhub.outputs.enabled == 'true'
+        env:
+          DOCKERHUB_TAGS: ${{ steps.meta-dockerhub.outputs.tags }}
+        shell: bash
+        run: |
+          first_tag="${DOCKERHUB_TAGS%%$'\n'*}"
+          docker buildx imagetools inspect "$first_tag" >/dev/null
+
+      - name: Publish summary
+        if: always()
+        env:
+          DOCKERHUB_ENABLED: ${{ steps.dockerhub.outputs.enabled }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          {
+            echo "## Container publication"
+            echo
+            echo "- GHCR: \`${GHCR_IMAGE}@${IMAGE_DIGEST}\`"
+            if [[ "$DOCKERHUB_ENABLED" == "true" ]]; then
+              echo "- Docker Hub: published with the same multi-platform digest"
+            else
+              echo "- Docker Hub: skipped; configure \`DOCKERHUB_USERNAME\` and \`DOCKERHUB_TOKEN\`"
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"

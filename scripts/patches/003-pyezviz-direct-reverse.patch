@@ -1,0 +1,1162 @@
+diff --git a/pyezvizapi/cas.py b/pyezvizapi/cas.py
+index 853ca7e..2494b86 100644
+--- a/pyezvizapi/cas.py
++++ b/pyezvizapi/cas.py
+@@ -2,9 +2,12 @@
+ 
+ from __future__ import annotations
+ 
++import base64
+ from dataclasses import dataclass
++import hashlib
++import hmac
+ from io import BytesIO
+-from itertools import cycle
++from itertools import count, cycle
+ import logging
+ import random
+ import socket
+@@ -12,6 +15,7 @@ import ssl
+ import struct
+ from typing import Any, cast
+ from xml.parsers.expat import ExpatError
++from xml.sax.saxutils import escape, quoteattr
+ 
+ from Crypto.Cipher import AES
+ import xmltodict
+@@ -32,6 +36,13 @@ CAS_VERSION_MARKER = b"\x01\x00\x00\x00"
+ CAS_COMMAND_GET_OPERATION_CODE = 0x2001
+ CAS_COMMAND_VERIFY = 0x2005
+ CAS_COMMAND_DEVICE_MESSAGE = 0x300F
++CAS_COMMAND_QUERY_GLINT_LIGHT = 0x3443
++CAS_COMMAND_DIRECT_REVERSE_CHECK_REQUEST = 0x2048
++CAS_COMMAND_DIRECT_REVERSE_CHECK_RESPONSE = 0x2049
++CAS_COMMAND_DIRECT_REVERSE_SETUP = 0x4977
++CAS_COMMAND_INVITE_REALTIME_STREAM = 0x3101
++CAS_ENCRYPTED_FRAME_FLAG = 0xFFFFFFFF
++CAS_NATIVE_AES_IV = b"01234567" + (b"\0" * 8)
+ CAS_TLS_CIPHERS = (
+     "DEFAULT:!aNULL:!eNULL:!MD5:!3DES:!DES:!RC4:!IDEA:!SEED:!aDSS:!SRP:!PSK"
+ )
+@@ -105,14 +116,56 @@ def _random_hex_trailer(size: int = CAS_RANDOM_TRAILER_SIZE) -> bytes:
+     return rand_hex_str.encode("latin1")
+ 
+ 
+-def _cas_tls_context() -> ssl.SSLContext:
+-    """Return the legacy TLS context accepted by the CAS cloud endpoint."""
+-    context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
++def _cas_tls_context(*, pinned_certificate: bool = False) -> ssl.SSLContext:
++    """Return the legacy TLS context accepted by the CAS cloud endpoint.
++
++    Device-specific CAS hosts can present a CA-valid certificate whose names do
++    not include the API-provided ``casIp`` hostname. The native SDK accepts this
++    layout. Keep certificate-chain verification enabled while disabling only
++    Python's hostname comparison.
++    """
++    if pinned_certificate:
++        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
++        context.check_hostname = False
++        context.verify_mode = ssl.CERT_NONE
++    else:
++        context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
++        context.check_hostname = False
+     context.minimum_version = ssl.TLSVersion.TLSv1_2
+     context.set_ciphers(CAS_TLS_CIPHERS)
+     return context
+ 
+ 
++def _normalize_certificate_sha256(value: str) -> str:
++    normalized = value.replace(":", "").strip().lower()
++    if len(normalized) != 64 or any(char not in "0123456789abcdef" for char in normalized):
++        raise ValueError("CAS certificate SHA-256 fingerprint must contain 64 hex digits")
++    return normalized
++
++
++def _wrap_cas_tls_socket(
++    sock: Any,
++    *,
++    host: str,
++    certificate_sha256: str | None,
++) -> Any:
++    """Wrap a CAS socket and optionally enforce an exact expired-cert pin."""
++    wrapped = _cas_tls_context(
++        pinned_certificate=certificate_sha256 is not None
++    ).wrap_socket(sock, server_hostname=host)
++    if certificate_sha256 is None:
++        return wrapped
++    peer_certificate = wrapped.getpeercert(binary_form=True)
++    if not isinstance(peer_certificate, bytes):
++        wrapped.close()
++        raise PyEzvizError("CAS server did not provide a certificate for pinning")
++    actual = hashlib.sha256(peer_certificate).hexdigest()
++    if not hmac.compare_digest(actual, certificate_sha256):
++        wrapped.close()
++        raise PyEzvizError("CAS server certificate fingerprint does not match the pin")
++    return wrapped
++
++
+ def _send_all(sock: Any, payload: bytes) -> None:
+     """Send the complete CAS frame over socket-like transports."""
+     sendall = getattr(sock, "sendall", None)
+@@ -185,6 +238,35 @@ class CasTransportResult:
+     response: bytes
+ 
+ 
++@dataclass(frozen=True)
++class CasNativeFrame:
++    """One encrypted frame produced by the native EZVIZ SSL wrapper."""
++
++    header: CasFrameHeader
++    plaintext: bytes
++    digest_valid: bool
++
++
++@dataclass(frozen=True)
++class CasTransferResponse:
++    """Parsed two-layer response from ``SendTransferDataToCAS``."""
++
++    outer: CasNativeFrame
++    inner: CasNativeFrame
++    outer_result: int
++    inner_result: int
++
++
++@dataclass(frozen=True)
++class CasInviteStreamResponse:
++    """Parsed response from ``InviteRealStreamStart``."""
++
++    frame: CasNativeFrame
++    result: int
++    play_session: int
++    stream_header: bytes
++
++
+ def _build_operation_code_request(
+     *,
+     session_id: str | None,
+@@ -212,6 +294,409 @@ def _build_operation_code_request(
+     )
+ 
+ 
++def _native_aes_key(key: str | bytes) -> bytes:
++    """Return the exact AES-128 key accepted by the native stream library."""
++    raw_key = key.encode("latin1") if isinstance(key, str) else key
++    if len(raw_key) != 16:
++        raise PyEzvizError("EZVIZ CAS AES key must be exactly 16 bytes")
++    return raw_key
++
++
++def _pkcs7_pad(payload: bytes, block_size: int = AES.block_size) -> bytes:
++    padding_size = block_size - (len(payload) % block_size)
++    return payload + bytes([padding_size]) * padding_size
++
++
++def _pkcs7_unpad(payload: bytes, block_size: int = AES.block_size) -> bytes:
++    if not payload or len(payload) % block_size:
++        raise PyEzvizError("Invalid EZVIZ CAS encrypted payload length")
++    padding_size = payload[-1]
++    if padding_size < 1 or padding_size > block_size:
++        raise PyEzvizError("Invalid EZVIZ CAS AES padding")
++    if payload[-padding_size:] != bytes([padding_size]) * padding_size:
++        raise PyEzvizError("Invalid EZVIZ CAS AES padding")
++    return payload[:-padding_size]
++
++
++def _build_native_encrypted_frame(
++    payload: bytes,
++    *,
++    key: str | bytes,
++    command: int,
++    sequence: int,
++    embedded_message_length: int = 0,
++) -> bytes:
++    """Reproduce ``ssl_generate_packet``/``GetMsgHeadReq`` byte-for-byte.
++
++    The native wrapper encrypts with AES-128-CBC and a fixed 16-byte IV,
++    records the encrypted body length twice (minus the embedded message length
++    in the last field), and appends the lowercase ASCII MD5 of the ciphertext.
++    """
++    if embedded_message_length < 0:
++        raise ValueError("embedded_message_length must not be negative")
++    cipher = AES.new(
++        _native_aes_key(key),
++        AES.MODE_CBC,
++        CAS_NATIVE_AES_IV,
++    )
++    ciphertext = cipher.encrypt(_pkcs7_pad(payload))
++    xml_size_hint = len(ciphertext) - embedded_message_length
++    if xml_size_hint < 0:
++        raise ValueError("embedded message is larger than encrypted payload")
++    return (
++        _cas_frame_header(
++            sequence=sequence,
++            command=command,
++            flags=CAS_ENCRYPTED_FRAME_FLAG,
++            body_size_hint=len(ciphertext),
++            tail_size_hint=xml_size_hint,
++        )
++        + ciphertext
++        + hashlib.md5(ciphertext).hexdigest().encode("ascii")  # noqa: S324
++    )
++
++
++def _build_native_plain_frame(
++    payload: bytes,
++    *,
++    command: int,
++    sequence: int,
++    embedded_message_length: int = 0,
++) -> bytes:
++    """Build the unencrypted native frame used by the device callback check."""
++    if embedded_message_length < 0:
++        raise ValueError("embedded_message_length must not be negative")
++    xml_size_hint = len(payload) - embedded_message_length
++    if xml_size_hint < 0:
++        raise ValueError("embedded message is larger than plain payload")
++    return (
++        _cas_frame_header(
++            sequence=sequence,
++            command=command,
++            flags=0,
++            body_size_hint=len(payload),
++            tail_size_hint=xml_size_hint,
++        )
++        + payload
++        + hashlib.md5(payload).hexdigest().encode("ascii")  # noqa: S324
++    )
++
++
++def _parse_native_frame(payload: bytes, *, key: str | bytes) -> CasNativeFrame:
++    """Parse one native encrypted CAS frame, including its 32-byte digest."""
++    header = CasFrameHeader.parse(payload)
++    frame_size = CAS_FRAME_HEADER_SIZE + header.body_size_hint + CAS_RESPONSE_DIGEST_SIZE
++    if len(payload) < frame_size:
++        raise PyEzvizError(
++            f"EZVIZ CAS frame is truncated ({len(payload)} < {frame_size})"
++        )
++    body_start = CAS_FRAME_HEADER_SIZE
++    body_end = body_start + header.body_size_hint
++    body = payload[body_start:body_end]
++    digest = payload[body_end:frame_size]
++    expected_digest = hashlib.md5(body).hexdigest().encode("ascii")  # noqa: S324
++    digest_valid = hmac.compare_digest(digest.lower(), expected_digest)
++
++    if header.flags == CAS_ENCRYPTED_FRAME_FLAG:
++        cipher = AES.new(
++            _native_aes_key(key),
++            AES.MODE_CBC,
++            CAS_NATIVE_AES_IV,
++        )
++        plaintext = _pkcs7_unpad(cipher.decrypt(body))
++    elif header.flags == 0:
++        plaintext = body
++    else:
++        raise PyEzvizError(
++            f"Unsupported EZVIZ CAS frame encryption flag: {header.flags:#x}"
++        )
++    return CasNativeFrame(
++        header=header,
++        plaintext=plaintext,
++        digest_valid=digest_valid,
++    )
++
++
++def _build_direct_reverse_setup_xml(
++    *,
++    operation_code: str,
++    listener_ip: str,
++    listener_port: int,
++) -> bytes:
++    """Build ``CChipParser::CreateSetupUPnPStreamReq`` XML."""
++    if not 1 <= listener_port <= 65535:
++        raise ValueError("listener_port must be between 1 and 65535")
++    return (
++        '<?xml version="1.0" encoding="utf-8"?>\n'
++        "<Request>\n"
++        f"\t<OperationCode>{operation_code}</OperationCode>\n"
++        f"\t<UPnP ip={quoteattr(listener_ip)} port={quoteattr(str(listener_port))} />\n"
++        "</Request>\n"
++    ).encode("latin1")
++
++
++def _build_invite_realtime_stream_xml(
++    *,
++    session_flag: str,
++    operation_code: str,
++    channel: int,
++    listener_ip: str,
++    listener_port: int,
++    stream_type: int = 2,
++    transport_protocol: int = 1,
++    encrypt_stream: bool = False,
++    ticket: str = "",
++    biz_code: str = "",
++    interval: int = 0,
++) -> bytes:
++    """Build ``CChipParser::CreateInviteRealtimeStreamReq`` XML.
++
++    Reverse-direct media is a second CAS operation after the callback ability
++    check. The receiver session flag is echoed in the device's private stream
++    header and lets the local server associate a new TCP connection with the
++    requested preview session.
++    """
++    if not session_flag:
++        raise ValueError("session_flag must not be empty")
++    if not operation_code:
++        raise ValueError("operation_code must not be empty")
++    if channel < 1:
++        raise ValueError("channel must be at least 1")
++    if not 1 <= listener_port <= 65535:
++        raise ValueError("listener_port must be between 1 and 65535")
++
++    legacy_stream_type = {1: "MAIN", 2: "SUB"}.get(stream_type, "")
++    transport = "TCP" if transport_protocol == 1 else ""
++    encrypted = "TRUE" if encrypt_stream else "FALSE"
++    return (
++        '<?xml version="1.0" encoding="utf-8"?>\n'
++        "<Request>\n"
++        f"\t<OperationCode>{escape(operation_code)}</OperationCode>\n"
++        f"\t<Channel>{channel}</Channel>\n"
++        f"\t<ReceiverInfo Address={quoteattr(listener_ip)} "
++        f"Port={quoteattr(str(listener_port))} ServerType=\"1\" "
++        f"StreamType={quoteattr(legacy_stream_type)} "
++        f"NewStreamType={quoteattr(str(stream_type))} "
++        f"TransProto={quoteattr(transport)} />\n"
++        f"\t<IsEncrypt>{encrypted}</IsEncrypt>\n"
++        f"\t<ReceiverInfoEx SessionID={quoteattr(session_flag)} "
++        f"Port={quoteattr(str(listener_port))} />\n"
++        f"\t<Authentication Ticket={quoteattr(ticket)} "
++        f"BizCode={quoteattr(biz_code)} Interval={quoteattr(str(interval))} />\n"
++        "</Request>\n"
++    ).encode("latin1")
++
++
++def _build_transfer_request_xml(
++    *,
++    session_id: str,
++    serial: str,
++    inner_frame: bytes,
++    client_type: int = 0,
++) -> bytes:
++    """Build ``CChipParser::CreateTransferReq`` XML plus its binary message."""
++    xml = (
++        '<?xml version="1.0" encoding="utf-8"?>\n'
++        "<Request>\n"
++        f"\t<Verify ClientSession={quoteattr(session_id)} "
++        f"ToDevice={quoteattr(serial)} ClientType={quoteattr(str(client_type))} />\n"
++        f"\t<Message Length={quoteattr(str(len(inner_frame)))} />\n"
++        "</Request>\n"
++    ).encode("latin1")
++    return xml + inner_frame
++
++
++def _build_direct_reverse_transfer_request(
++    *,
++    session_id: str,
++    serial: str,
++    device_session: CasDeviceSession,
++    listener_ip: str,
++    listener_port: int,
++    inner_sequence: int,
++    outer_sequence: int,
++    client_type: int = 0,
++) -> bytes:
++    """Build the native CAS notification that asks a camera to connect back."""
++    return _build_device_transfer_request(
++        session_id=session_id,
++        serial=serial,
++        device_session=device_session,
++        inner_payload=_build_direct_reverse_setup_xml(
++            operation_code=device_session.operation_code,
++            listener_ip=listener_ip,
++            listener_port=listener_port,
++        ),
++        inner_command=CAS_COMMAND_DIRECT_REVERSE_SETUP,
++        inner_encrypted=True,
++        inner_sequence=inner_sequence,
++        outer_sequence=outer_sequence,
++        client_type=client_type,
++    )
++
++
++def _build_device_transfer_request(
++    *,
++    session_id: str,
++    serial: str,
++    device_session: CasDeviceSession,
++    inner_payload: bytes,
++    inner_command: int,
++    inner_encrypted: bool,
++    inner_sequence: int,
++    outer_sequence: int,
++    client_type: int = 0,
++) -> bytes:
++    """Build a current-SDK ``SendTransferDataToCAS`` nested request."""
++    if inner_encrypted:
++        inner_frame = _build_native_encrypted_frame(
++            inner_payload,
++            key=device_session.key,
++            command=inner_command,
++            sequence=inner_sequence,
++        )
++    else:
++        inner_frame = _build_native_plain_frame(
++            inner_payload,
++            command=inner_command,
++            sequence=inner_sequence,
++        )
++    transfer_payload = _build_transfer_request_xml(
++        session_id=session_id,
++        serial=serial,
++        inner_frame=inner_frame,
++        client_type=client_type,
++    )
++    # SendTransferDataToCAS establishes a TLS transport, but passes encryption
++    # mode 0 to TCPSendWait for the outer 0x2005 envelope. Only the nested
++    # device command may use AES. The outer body therefore remains plaintext.
++    return _build_native_plain_frame(
++        transfer_payload,
++        command=CAS_COMMAND_VERIFY,
++        sequence=outer_sequence,
++        embedded_message_length=len(inner_frame),
++    )
++
++
++def _build_query_glint_light_xml(*, operation_code: str) -> bytes:
++    """Build the read-only ``CreateQueryGlintLightReq`` payload."""
++    return (
++        '<?xml version="1.0" encoding="utf-8"?>\n'
++        "<Request>\n"
++        f"\t<OperationCode>{operation_code}</OperationCode>\n"
++        "</Request>\n"
++    ).encode("latin1")
++
++
++def _xml_result(payload: bytes, *, layer: str) -> int:
++    try:
++        doc = xmltodict.parse(payload)
++    except ExpatError as err:
++        raise PyEzvizError(f"Could not parse {layer} EZVIZ CAS XML response") from err
++    response = doc.get("Response") if isinstance(doc, dict) else None
++    if not isinstance(response, dict) or "Result" not in response:
++        raise PyEzvizError(f"{layer} EZVIZ CAS response is missing Result")
++    try:
++        return int(cast(str, response["Result"]))
++    except (TypeError, ValueError) as err:
++        raise PyEzvizError(f"{layer} EZVIZ CAS Result is not an integer") from err
++
++
++def _parse_transfer_response(
++    payload: bytes,
++    *,
++    key: str | bytes,
++) -> CasTransferResponse:
++    """Parse the nested response returned for a CAS transfer request."""
++    outer = _parse_native_frame(payload, key=key)
++    inner_offset = outer.plaintext.find(CAS_FRAME_MAGIC)
++    if inner_offset < 0:
++        raise PyEzvizError("EZVIZ CAS transfer response is missing the inner frame")
++    outer_xml = outer.plaintext[:inner_offset]
++    inner_payload = outer.plaintext[inner_offset:]
++    inner = _parse_native_frame(inner_payload, key=key)
++    return CasTransferResponse(
++        outer=outer,
++        inner=inner,
++        outer_result=_xml_result(outer_xml, layer="Outer"),
++        inner_result=_xml_result(inner.plaintext, layer="Inner"),
++    )
++
++
++def _parse_invite_stream_response(
++    payload: bytes,
++    *,
++    key: str | bytes,
++) -> CasInviteStreamResponse:
++    """Parse ``ParseInviteRealtimeStreamRsp`` and decode its stream header."""
++    frame = _parse_native_frame(payload, key=key)
++    return _parse_invite_stream_frame(frame)
++
++
++def _parse_invite_stream_frame(frame: CasNativeFrame) -> CasInviteStreamResponse:
++    """Parse an already-decoded inner invite response frame."""
++    try:
++        doc = xmltodict.parse(frame.plaintext)
++    except ExpatError as err:
++        raise PyEzvizError("Could not parse EZVIZ invite-stream XML response") from err
++    response = doc.get("Response") if isinstance(doc, dict) else None
++    if not isinstance(response, dict):
++        raise PyEzvizError("EZVIZ invite-stream response is missing Response")
++    try:
++        result = int(cast(str, response["Result"]))
++    except (KeyError, TypeError, ValueError) as err:
++        raise PyEzvizError("EZVIZ invite-stream response is missing Result") from err
++    if result != 0:
++        return CasInviteStreamResponse(
++            frame=frame,
++            result=result,
++            play_session=-1,
++            stream_header=b"",
++        )
++
++    stream_header_node = response.get("StreamHeader")
++    if not isinstance(stream_header_node, dict):
++        raise PyEzvizError("EZVIZ invite-stream response is missing StreamHeader")
++    encoded_header = stream_header_node.get("@Base64Data")
++    if not isinstance(encoded_header, str):
++        raise PyEzvizError("EZVIZ invite-stream response is missing Base64Data")
++    try:
++        stream_header = base64.b64decode(encoded_header, validate=True)
++        play_session = int(cast(str, response["Session"]))
++    except (KeyError, TypeError, ValueError) as err:
++        raise PyEzvizError("EZVIZ invite-stream response has invalid session data") from err
++    except base64.binascii.Error as err:
++        raise PyEzvizError("EZVIZ invite-stream response has invalid Base64Data") from err
++    return CasInviteStreamResponse(
++        frame=frame,
++        result=result,
++        play_session=play_session,
++        stream_header=stream_header,
++    )
++
++
++def _recv_exact(sock: Any, size: int) -> bytes:
++    """Read exactly ``size`` bytes or raise on a closed CAS connection."""
++    chunks: list[bytes] = []
++    received = 0
++    while received < size:
++        chunk = sock.recv(size - received)
++        if not chunk:
++            raise PyEzvizError("EZVIZ CAS connection closed during frame receive")
++        chunks.append(chunk)
++        received += len(chunk)
++    return b"".join(chunks)
++
++
++def _recv_native_frame(sock: Any) -> bytes:
++    header_bytes = _recv_exact(sock, CAS_FRAME_HEADER_SIZE)
++    header = CasFrameHeader.parse(header_bytes)
++    return header_bytes + _recv_exact(
++        sock,
++        header.body_size_hint + CAS_RESPONSE_DIGEST_SIZE,
++    )
++
++
+ def _build_defence_plaintext(
+     *,
+     serial: str,
+@@ -281,7 +766,14 @@ def _build_defence_request(
+ class EzvizCAS:
+     """Ezviz CAS server client."""
+ 
+-    def __init__(self, token: dict[str, Any] | None) -> None:
++    def __init__(
++        self,
++        token: dict[str, Any] | None,
++        *,
++        cas_host: str | None = None,
++        cas_port: int | None = None,
++        cas_certificate_sha256: str | None = None,
++    ) -> None:
+         """Initialize the client object."""
+         self._session = None
+         self._token: dict[str, Any] = token or {
+@@ -295,11 +787,35 @@ class EzvizCAS:
+                 "Missing service_urls in token; call EzvizClient.login() first"
+             )
+         self._service_urls: dict[str, Any] = token["service_urls"]
++        if (cas_host is None) != (cas_port is None):
++            raise ValueError("cas_host and cas_port must be provided together")
++        self._cas_address_override = (
++            (cas_host, cas_port)
++            if cas_host is not None and cas_port is not None
++            else None
++        )
++        self._cas_certificate_sha256 = (
++            _normalize_certificate_sha256(cas_certificate_sha256)
++            if cas_certificate_sha256 is not None
++            else None
++        )
++        # The native CSessionIDGenerator singleton starts at zero and returns
++        # one, two, ... for consecutive ssl_generate_packet calls. A direct-
++        # reverse request builds the inner frame first and the outer frame
++        # second, so a fresh client must send sequence 1 followed by 2.
++        self._native_sequence = count(1)
+ 
+     def _cloud_address(self) -> tuple[str, int]:
+         """Return the configured CAS cloud endpoint."""
+-        host = cast(str, self._service_urls["sysConf"][15])
+-        port = cast(int, self._service_urls["sysConf"][16])
++        if self._cas_address_override is not None:
++            return self._cas_address_override
++        sys_conf = self._service_urls.get("sysConf")
++        if not isinstance(sys_conf, (list, tuple)) or len(sys_conf) <= 16:
++            raise PyEzvizError(
++                "CAS address is absent from service metadata; provide the device casIp/casPort"
++            )
++        host = cast(str, sys_conf[15])
++        port = int(sys_conf[16])
+         return host, port
+ 
+     def _hardware_code(self) -> str:
+@@ -312,6 +828,10 @@ class EzvizCAS:
+             or FEATURE_CODE,
+         )
+ 
++    def next_native_sequence(self) -> int:
++        """Reserve the next process-local native frame sequence number."""
++        return next(self._native_sequence)
++
+     def _send_cas_payload(
+         self,
+         payload: bytes,
+@@ -326,7 +846,11 @@ class EzvizCAS:
+         if hasattr(sock, "settimeout"):
+             sock.settimeout(CAS_SOCKET_TIMEOUT)
+         if use_tls:
+-            sock = _cas_tls_context().wrap_socket(sock, server_hostname=host)
++            sock = _wrap_cas_tls_socket(
++                sock,
++                host=host,
++                certificate_sha256=self._cas_certificate_sha256,
++            )
+             if hasattr(sock, "settimeout"):
+                 sock.settimeout(CAS_SOCKET_TIMEOUT)
+ 
+@@ -394,6 +918,175 @@ class EzvizCAS:
+             use_tls=False,
+         )
+ 
++    def notify_device_direct_reverse(
++        self,
++        serial: str,
++        *,
++        listener_ip: str,
++        listener_port: int,
++        device_session: CasDeviceSession | None = None,
++        client_type: int = 0,
++        inner_sequence: int | None = None,
++        outer_sequence: int | None = None,
++    ) -> CasTransferResponse:
++        """Ask an EZVIZ device to open a reverse-direct TCP connection.
++
++        This reproduces the native ``CDirectReverseServer`` CAS notification.
++        It only performs the cloud control-plane request; callers must start the
++        local TCP listener before invoking it.
++        """
++        selected_session = device_session or CasDeviceSession.from_response(
++            self.cas_get_encryption(serial)
++        )
++        parsed = self._send_device_transfer(
++            serial,
++            device_session=selected_session,
++            inner_payload=_build_direct_reverse_setup_xml(
++                operation_code=selected_session.operation_code,
++                listener_ip=listener_ip,
++                listener_port=listener_port,
++            ),
++            inner_command=CAS_COMMAND_DIRECT_REVERSE_SETUP,
++            inner_encrypted=True,
++            client_type=client_type,
++            inner_sequence=inner_sequence,
++            outer_sequence=outer_sequence,
++        )
++        if parsed.outer_result != 0 or parsed.inner_result != 0:
++            raise PyEzvizError(
++                "EZVIZ direct-reverse setup was rejected "
++                f"(outer={parsed.outer_result}, inner={parsed.inner_result})"
++            )
++        return parsed
++
++    def query_device_glint_light(
++        self,
++        serial: str,
++        *,
++        device_session: CasDeviceSession | None = None,
++    ) -> CasTransferResponse:
++        """Send a read-only nested transfer to validate CAS framing."""
++        selected_session = device_session or CasDeviceSession.from_response(
++            self.cas_get_encryption(serial)
++        )
++        return self._send_device_transfer(
++            serial,
++            device_session=selected_session,
++            inner_payload=_build_query_glint_light_xml(
++                operation_code=selected_session.operation_code
++            ),
++            inner_command=CAS_COMMAND_QUERY_GLINT_LIGHT,
++            inner_encrypted=False,
++        )
++
++    def invite_direct_reverse_stream(
++        self,
++        *,
++        session_flag: str,
++        serial: str,
++        listener_ip: str,
++        listener_port: int,
++        device_session: CasDeviceSession,
++        channel: int = 1,
++        stream_type: int = 2,
++        transport_protocol: int = 1,
++        encrypt_stream: bool = True,
++    ) -> CasInviteStreamResponse:
++        """Invite an owned camera to send preview media to a local listener."""
++        client_session = self._token.get("session_id")
++        if not isinstance(client_session, str) or not client_session:
++            raise PyEzvizError("Missing EZVIZ client session for stream invite")
++        request_xml = _build_invite_realtime_stream_xml(
++            session_flag=session_flag,
++            operation_code=device_session.operation_code,
++            channel=channel,
++            listener_ip=listener_ip,
++            listener_port=listener_port,
++            stream_type=stream_type,
++            transport_protocol=transport_protocol,
++            encrypt_stream=encrypt_stream,
++        )
++        transfer = self._send_device_transfer(
++            serial,
++            device_session=device_session,
++            inner_payload=request_xml,
++            inner_command=CAS_COMMAND_INVITE_REALTIME_STREAM,
++            inner_encrypted=True,
++        )
++        if transfer.outer_result != 0:
++            raise PyEzvizError(
++                "EZVIZ stream invite transfer was rejected "
++                f"({transfer.outer_result})"
++            )
++        parsed = _parse_invite_stream_frame(transfer.inner)
++        if parsed.result != 0:
++            raise PyEzvizError(
++                f"EZVIZ direct-reverse stream invite was rejected ({parsed.result})"
++            )
++        return parsed
++
++    def _send_device_transfer(
++        self,
++        serial: str,
++        *,
++        device_session: CasDeviceSession,
++        inner_payload: bytes,
++        inner_command: int,
++        inner_encrypted: bool,
++        client_type: int = 0,
++        inner_sequence: int | None = None,
++        outer_sequence: int | None = None,
++    ) -> CasTransferResponse:
++        """Send one current-SDK nested transfer through the CAS control plane."""
++        session_id = self._token.get("session_id")
++        if not isinstance(session_id, str) or not session_id:
++            raise PyEzvizError("Missing EZVIZ client session for device transfer")
++        payload = _build_device_transfer_request(
++            session_id=session_id,
++            serial=serial,
++            device_session=device_session,
++            inner_payload=inner_payload,
++            inner_command=inner_command,
++            inner_encrypted=inner_encrypted,
++            inner_sequence=(
++                self.next_native_sequence()
++                if inner_sequence is None
++                else inner_sequence
++            ),
++            outer_sequence=(
++                self.next_native_sequence()
++                if outer_sequence is None
++                else outer_sequence
++            ),
++            client_type=client_type,
++        )
++        host, port = self._cloud_address()
++        sock = socket.create_connection((host, port))
++        if hasattr(sock, "settimeout"):
++            sock.settimeout(CAS_SOCKET_TIMEOUT)
++        sock = _wrap_cas_tls_socket(
++            sock,
++            host=host,
++            certificate_sha256=self._cas_certificate_sha256,
++        )
++        if hasattr(sock, "settimeout"):
++            sock.settimeout(CAS_SOCKET_TIMEOUT)
++        try:
++            _send_all(sock, payload)
++            response = _recv_native_frame(sock)
++        except TimeoutError as err:
++            raise PyEzvizError(
++                "Timed out waiting for direct-reverse CAS response"
++            ) from err
++        except ConnectionResetError as err:
++            raise PyEzvizError("Direct-reverse CAS connection was reset") from err
++        except (socket.gaierror, ConnectionRefusedError) as err:
++            raise InvalidHost("Invalid EZVIZ CAS IP or hostname") from err
++        finally:
++            sock.close()
++
++        return _parse_transfer_response(response, key=device_session.key)
++
+     def set_camera_defence_state(self, serial: str, enable: int = 1) -> bool:
+         """Enable alarm notifications."""
+         device_session = CasDeviceSession.from_response(self.cas_get_encryption(serial))
+diff --git a/tests/test_cas.py b/tests/test_cas.py
+index 1827e0a..8afbaf5 100644
+--- a/tests/test_cas.py
++++ b/tests/test_cas.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import base64
+ import ssl
+ from typing import Any
+ 
+@@ -7,9 +8,13 @@ from Crypto.Cipher import AES
+ import pytest
+ 
+ from pyezvizapi.cas import (
++    CAS_COMMAND_DIRECT_REVERSE_CHECK_REQUEST,
++    CAS_COMMAND_DIRECT_REVERSE_SETUP,
+     CAS_COMMAND_DEVICE_MESSAGE,
+     CAS_COMMAND_GET_OPERATION_CODE,
++    CAS_COMMAND_INVITE_REALTIME_STREAM,
+     CAS_COMMAND_VERIFY,
++    CAS_ENCRYPTED_FRAME_FLAG,
+     CAS_FRAME_HEADER_SIZE,
+     CAS_FRAME_MAGIC,
+     CAS_OPERATION_CODE_RANDOM_TRAILER_SIZE,
+@@ -18,6 +23,13 @@ from pyezvizapi.cas import (
+     CasDeviceSession,
+     CasFrameHeader,
+     EzvizCAS,
++    _build_direct_reverse_transfer_request,
++    _build_invite_realtime_stream_xml,
++    _build_native_encrypted_frame,
++    _build_native_plain_frame,
++    _parse_native_frame,
++    _parse_invite_stream_response,
++    _parse_transfer_response,
+     xor_enc_dec,
+ )
+ from pyezvizapi.exceptions import PyEzvizError
+@@ -83,6 +95,23 @@ def test_cas_requires_service_urls_in_token() -> None:
+         EzvizCAS({"session_id": "session-id"})
+ 
+ 
++def test_cas_accepts_device_specific_address_override() -> None:
++    token = _token()
++    token["service_urls"]["sysConf"] = []
++
++    cas = EzvizCAS(token, cas_host="cas.example.test", cas_port=6500)
++
++    assert cas._cloud_address() == ("cas.example.test", 6500)
++
++
++def test_cas_short_service_metadata_requires_device_address() -> None:
++    token = _token()
++    token["service_urls"]["sysConf"] = ["1"] * 13
++
++    with pytest.raises(PyEzvizError, match="provide the device casIp/casPort"):
++        EzvizCAS(token)._cloud_address()
++
++
+ def test_cas_get_encryption_parses_xml_response(monkeypatch) -> None:
+     body = (
+         b'<?xml version="1.0" encoding="utf-8"?>'
+@@ -139,6 +168,298 @@ def test_cas_device_session_infers_aes128_encrypt_type() -> None:
+     assert device_session.encrypt_type == 1
+ 
+ 
++def test_native_encrypted_frame_matches_reverse_engineered_wrapper() -> None:
++    plaintext = b"<Request><Result>0</Result></Request>"
++    frame = _build_native_encrypted_frame(
++        plaintext,
++        key="1234567890abcdef",
++        command=CAS_COMMAND_DIRECT_REVERSE_SETUP,
++        sequence=0x12345678,
++    )
++
++    header = CasFrameHeader.parse(frame)
++    assert header.sequence == 0x12345678
++    assert header.command == CAS_COMMAND_DIRECT_REVERSE_SETUP
++    assert header.flags == CAS_ENCRYPTED_FRAME_FLAG
++    assert header.body_size_hint % AES.block_size == 0
++    assert header.tail_size_hint == header.body_size_hint
++    assert len(frame) == CAS_FRAME_HEADER_SIZE + header.body_size_hint + 32
++
++    parsed = _parse_native_frame(frame, key="1234567890abcdef")
++    assert parsed.plaintext == plaintext
++    assert parsed.digest_valid is True
++
++
++def test_native_plain_frame_round_trips_callback_check() -> None:
++    plaintext = b"<Response><Result>0</Result></Response>"
++    frame = _build_native_plain_frame(
++        plaintext,
++        command=CAS_COMMAND_DIRECT_REVERSE_CHECK_REQUEST,
++        sequence=11,
++    )
++
++    parsed = _parse_native_frame(frame, key=b"")
++
++    assert parsed.header.flags == 0
++    assert parsed.header.body_size_hint == len(plaintext)
++    assert parsed.header.tail_size_hint == len(plaintext)
++    assert parsed.plaintext == plaintext
++    assert parsed.digest_valid is True
++
++
++def test_direct_reverse_transfer_nests_setup_frame() -> None:
++    session = CasDeviceSession(
++        key="1234567890abcdef",
++        operation_code="0123456",
++    )
++    frame = _build_direct_reverse_transfer_request(
++        session_id="session-id",
++        serial="CAM123456",
++        device_session=session,
++        listener_ip="192.0.2.50",
++        listener_port=41000,
++        inner_sequence=7,
++        outer_sequence=8,
++    )
++
++    outer = _parse_native_frame(frame, key=session.key)
++    assert outer.header.command == CAS_COMMAND_VERIFY
++    assert b'ClientSession="session-id"' in outer.plaintext
++    assert b'ToDevice="CAM123456"' in outer.plaintext
++    inner_offset = outer.plaintext.index(CAS_FRAME_MAGIC)
++    inner_raw = outer.plaintext[inner_offset:]
++    inner = _parse_native_frame(inner_raw, key=session.key)
++    assert inner.header.command == CAS_COMMAND_DIRECT_REVERSE_SETUP
++    assert b"<OperationCode>0123456</OperationCode>" in inner.plaintext
++    assert b'ip="192.0.2.50"' in inner.plaintext
++    assert b'port="41000"' in inner.plaintext
++    assert outer.header.tail_size_hint == (
++        outer.header.body_size_hint - len(inner_raw)
++    )
++
++
++def test_invite_realtime_stream_xml_matches_native_fields() -> None:
++    xml = _build_invite_realtime_stream_xml(
++        session_flag="ClientReverse-7-CAM123456-1-2",
++        operation_code="0123456",
++        channel=1,
++        listener_ip="192.0.2.50",
++        listener_port=41000,
++        stream_type=2,
++        transport_protocol=1,
++        encrypt_stream=False,
++    )
++
++    assert b"<OperationCode>0123456</OperationCode>" in xml
++    assert b"<Channel>1</Channel>" in xml
++    assert b'Address="192.0.2.50"' in xml
++    assert b'Port="41000"' in xml
++    assert b'StreamType="SUB"' in xml
++    assert b'NewStreamType="2"' in xml
++    assert b'TransProto="TCP"' in xml
++    assert b"<IsEncrypt>FALSE</IsEncrypt>" in xml
++    assert b'SessionID="ClientReverse-7-CAM123456-1-2"' in xml
++
++
++def test_parse_invite_stream_response_decodes_header() -> None:
++    key = "1234567890abcdef"
++    stream_header = b"private-stream-header"
++    encoded = base64.b64encode(stream_header).decode("ascii")
++    response_xml = (
++        '<?xml version="1.0"?><Response><Result>0</Result><Session>42</Session>'
++        f'<StreamHeader Base64Data="{encoded}" Base64Length="{len(encoded)}" />'
++        "</Response>"
++    ).encode("ascii")
++    response = _build_native_encrypted_frame(
++        response_xml,
++        key=key,
++        command=CAS_COMMAND_INVITE_REALTIME_STREAM + 1,
++        sequence=9,
++    )
++
++    parsed = _parse_invite_stream_response(response, key=key)
++
++    assert parsed.result == 0
++    assert parsed.play_session == 42
++    assert parsed.stream_header == stream_header
++    assert parsed.frame.digest_valid is True
++
++
++def test_invite_direct_reverse_stream_uses_nested_transfer(monkeypatch) -> None:
++    session = CasDeviceSession(
++        key="1234567890abcdef",
++        operation_code="0123456",
++    )
++    stream_header = b"private-stream-header"
++    encoded = base64.b64encode(stream_header).decode("ascii")
++    sent_payloads: list[bytes] = []
++
++    class InviteSocket(FakeSocket):
++        def sendall(self, payload: bytes) -> None:
++            sent_payloads.append(payload)
++            inner = _build_native_encrypted_frame(
++                (
++                    '<?xml version="1.0"?><Response><Result>0</Result>'
++                    '<Session>42</Session><StreamHeader '
++                    f'Base64Data="{encoded}" Base64Length="{len(encoded)}" />'
++                    "</Response>"
++                ).encode("ascii"),
++                key=session.key,
++                command=CAS_COMMAND_INVITE_REALTIME_STREAM + 1,
++                sequence=20,
++            )
++            outer_xml = (
++                b'<?xml version="1.0"?><Response><Result>0</Result>'
++                + f'<Message Length="{len(inner)}" /></Response>'.encode("ascii")
++            )
++            self.response = _build_native_plain_frame(
++                outer_xml + inner,
++                command=CAS_COMMAND_VERIFY + 1,
++                sequence=21,
++                embedded_message_length=len(inner),
++            )
++
++        def recv(self, size: int = 1024) -> bytes:
++            result, self.response = self.response[:size], self.response[size:]
++            return result
++
++        def settimeout(self, value: float) -> None:
++            pass
++
++    monkeypatch.setattr(
++        "pyezvizapi.cas.socket.create_connection",
++        lambda _address: InviteSocket(),
++    )
++    monkeypatch.setattr(
++        "pyezvizapi.cas._wrap_cas_tls_socket",
++        lambda sock, **kwargs: sock,
++    )
++
++    result = EzvizCAS(_token()).invite_direct_reverse_stream(
++        session_flag="ClientReverse-7-CAM123456-1-2",
++        serial="CAM123456",
++        listener_ip="192.0.2.50",
++        listener_port=41000,
++        device_session=session,
++    )
++
++    outer = _parse_native_frame(sent_payloads[0], key=session.key)
++    inner_at = outer.plaintext.index(CAS_FRAME_MAGIC)
++    inner = _parse_native_frame(outer.plaintext[inner_at:], key=session.key)
++    assert outer.header.command == CAS_COMMAND_VERIFY
++    assert inner.header.command == CAS_COMMAND_INVITE_REALTIME_STREAM
++    assert b"<IsEncrypt>TRUE</IsEncrypt>" in inner.plaintext
++    assert result.play_session == 42
++    assert result.stream_header == stream_header
++
++
++def test_direct_reverse_uses_native_incrementing_sequences(monkeypatch) -> None:
++    session = CasDeviceSession(
++        key="1234567890abcdef",
++        operation_code="0123456",
++    )
++    sent_payloads: list[bytes] = []
++
++    def fake_send(payload: bytes) -> bytes:
++        sent_payloads.append(payload)
++        inner = _build_native_encrypted_frame(
++            b'<?xml version="1.0"?><Response><Result>0</Result></Response>',
++            key=session.key,
++            command=CAS_COMMAND_DIRECT_REVERSE_SETUP + 1,
++            sequence=20,
++        )
++        response_xml = (
++            b'<?xml version="1.0"?><Response><Result>0</Result>'
++            + f'<Message Length="{len(inner)}" /></Response>'.encode("ascii")
++            + inner
++        )
++        return _build_native_encrypted_frame(
++            response_xml,
++            key=session.key,
++            command=CAS_COMMAND_VERIFY + 1,
++            sequence=21,
++            embedded_message_length=len(inner),
++        )
++
++    class DirectReverseSocket(FakeSocket):
++        def sendall(self, payload: bytes) -> None:
++            self.response = fake_send(payload)
++
++        def recv(self, size: int = 1024) -> bytes:
++            result, self.response = self.response[:size], self.response[size:]
++            return result
++
++        def settimeout(self, value: float) -> None:
++            pass
++
++    sockets: list[DirectReverseSocket] = []
++
++    def fake_create_connection(address: tuple[str, int]) -> DirectReverseSocket:
++        sock = DirectReverseSocket()
++        sockets.append(sock)
++        return sock
++
++    monkeypatch.setattr("pyezvizapi.cas.socket.create_connection", fake_create_connection)
++    monkeypatch.setattr(
++        "pyezvizapi.cas._wrap_cas_tls_socket",
++        lambda sock, **kwargs: sock,
++    )
++    cas = EzvizCAS(_token())
++
++    for _ in range(2):
++        result = cas.notify_device_direct_reverse(
++            "CAM123456",
++            listener_ip="192.0.2.50",
++            listener_port=41000,
++            device_session=session,
++        )
++        assert result.outer_result == 0
++        assert result.inner_result == 0
++
++    first_outer = _parse_native_frame(sent_payloads[0], key=session.key)
++    first_inner_at = first_outer.plaintext.index(CAS_FRAME_MAGIC)
++    first_inner = _parse_native_frame(
++        first_outer.plaintext[first_inner_at:], key=session.key
++    )
++    second_outer = _parse_native_frame(sent_payloads[1], key=session.key)
++    second_inner_at = second_outer.plaintext.index(CAS_FRAME_MAGIC)
++    second_inner = _parse_native_frame(
++        second_outer.plaintext[second_inner_at:], key=session.key
++    )
++
++    assert (first_inner.header.sequence, first_outer.header.sequence) == (1, 2)
++    assert (second_inner.header.sequence, second_outer.header.sequence) == (3, 4)
++
++
++def test_parse_transfer_response_reads_both_result_layers() -> None:
++    key = "1234567890abcdef"
++    inner = _build_native_encrypted_frame(
++        b'<?xml version="1.0"?><Response><Result>0</Result></Response>',
++        key=key,
++        command=CAS_COMMAND_DIRECT_REVERSE_SETUP + 1,
++        sequence=9,
++    )
++    outer_plaintext = (
++        b'<?xml version="1.0"?><Response><Result>0</Result>'
++        + f'<Message Length="{len(inner)}" /></Response>'.encode("ascii")
++        + inner
++    )
++    outer = _build_native_encrypted_frame(
++        outer_plaintext,
++        key=key,
++        command=CAS_COMMAND_VERIFY + 1,
++        sequence=10,
++        embedded_message_length=len(inner),
++    )
++
++    parsed = _parse_transfer_response(outer, key=key)
++
++    assert parsed.outer_result == 0
++    assert parsed.inner_result == 0
++    assert parsed.outer.digest_valid is True
++    assert parsed.inner.digest_valid is True
++
++
+ def test_cas_device_session_rejects_non_session_response() -> None:
+     response = {"Response": {"Result": "1052173", "Limit": "-9999"}}
+ 
