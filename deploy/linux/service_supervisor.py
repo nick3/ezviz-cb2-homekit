@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import config_tool
-from ezviz_discovery import interface_ipv4_addresses
+from ezviz_discovery import interface_lan_addresses
 from runtime_settings import (
     AUTH_STATE_FILE_NAME,
     SettingsError,
@@ -345,7 +345,7 @@ def main() -> int:
         print(f"[桥接服务] 无法启动：{error}", file=sys.stderr, flush=True)
         return 1
     startup_error = _initialize_persistent_state(settings_store, config_file, template)
-    addresses = interface_ipv4_addresses()
+    addresses = interface_lan_addresses()
     try:
         tls = ensure_tls_certificate(data_dir, host=host, addresses=addresses)
     except (OSError, TLSConfigError) as error:

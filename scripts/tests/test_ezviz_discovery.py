@@ -4,6 +4,8 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import pytest
+
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 LINUX_DIR = PROJECT_DIR / "deploy" / "linux"
 sys.path.insert(0, str(LINUX_DIR))
@@ -78,3 +80,27 @@ def test_parse_rejects_public_oversized_and_entity_expanding_payloads() -> None:
 </ProbeMatch>
 """
     assert ezviz_discovery.parse_probe_response(entity_payload) is None
+
+
+def test_interface_ipv6_addresses_keep_scope_only_for_link_local_urls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    interfaces = tmp_path / "if_inet6"
+    interfaces.write_text(
+        "\n".join(
+            (
+                "00000000000000000000000000000001 01 80 10 80 lo",
+                "fe800000000000000000000000000001 02 40 20 80 eth0",
+                "fd120000000000000000000000000010 02 40 00 80 eth0",
+                "26064700000000000000000000001111 02 40 00 80 eth0",
+            )
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(ezviz_discovery, "IPV6_INTERFACES_PATH", interfaces)
+
+    assert ezviz_discovery.interface_ipv6_addresses() == [
+        "fd12::10",
+        "fe80::1%eth0",
+    ]

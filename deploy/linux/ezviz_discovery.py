@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from xml.etree.ElementTree import Element
 
 from defusedxml import ElementTree as DefusedET
@@ -21,6 +22,7 @@ MAX_RESPONSE_BYTES = 65535
 PROBE_TYPES = ("inquiry", "inquiry_v32")
 SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
 SIOCGIFADDR = 0x8915  # Linux ioctl; failures use the hostname fallback below.
+IPV6_INTERFACES_PATH = Path("/proc/net/if_inet6")
 
 
 @dataclass(frozen=True)
@@ -162,6 +164,72 @@ def interface_ipv4_addresses() -> list[str]:
     except OSError:
         pass
     return sorted(addresses)
+
+
+def _usable_ipv6(value: str, interface: str = "") -> str:
+    text = value.strip().strip("[]")
+    address_text, _, supplied_scope = text.partition("%")
+    try:
+        address = ipaddress.ip_address(address_text)
+    except ValueError:
+        return ""
+    if not isinstance(address, ipaddress.IPv6Address) or address.ipv4_mapped:
+        return ""
+    if address.is_unspecified or address.is_loopback or address.is_multicast:
+        return ""
+    if not (address.is_private or address.is_link_local):
+        return ""
+    if address.is_link_local:
+        scope = supplied_scope.strip() or interface.strip()
+        if scope:
+            return f"{address.compressed}%{scope}"
+    return address.compressed
+
+
+def interface_ipv6_addresses() -> list[str]:
+    """Return usable LAN IPv6 addresses, scoped when link-local."""
+
+    addresses: set[str] = set()
+    try:
+        for line in IPV6_INTERFACES_PATH.read_text(encoding="ascii").splitlines():
+            fields = line.split()
+            if len(fields) != 6:
+                continue
+            packed, _, _, _, _, interface = fields
+            try:
+                value = socket.inet_ntop(socket.AF_INET6, bytes.fromhex(packed))
+            except (OSError, ValueError):
+                continue
+            address = _usable_ipv6(value, interface)
+            if address:
+                addresses.add(address)
+    except OSError:
+        pass
+
+    if not addresses:
+        try:
+            items = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET6)
+        except OSError:
+            items = []
+        for item in items:
+            sockaddr = item[4]
+            scope_id = sockaddr[3] if len(sockaddr) > 3 else 0
+            interface = ""
+            if scope_id:
+                try:
+                    interface = socket.if_indextoname(scope_id)
+                except OSError:
+                    interface = str(scope_id)
+            address = _usable_ipv6(sockaddr[0], interface)
+            if address:
+                addresses.add(address)
+    return sorted(addresses)
+
+
+def interface_lan_addresses() -> list[str]:
+    """Return stable IPv4 and IPv6 addresses for TLS SANs and setup URLs."""
+
+    return [*interface_ipv4_addresses(), *interface_ipv6_addresses()]
 
 
 def _resolved_serial_hint(serial_hint: str) -> DiscoveredDevice | None:

@@ -28,6 +28,8 @@ Linux capabilities 和 `no-new-privileges`，但这些措施不能把 host netwo
 请求处理内存中，不会写入状态卷。即使监听所有接口，它也会拒绝环回、链路
 本地、RFC 1918、CGNAT 和 IPv6 ULA 之外的客户端；多网卡主机还可通过
 `.env` 中的 `EZVIZ_SETUP_HOST` 将它绑定到指定的可信 LAN 地址。
+IPv6-only 的可信网络可将该值设为 `::`；启动时会把检测到的 ULA 和链路本地
+地址加入证书 SAN，并在日志 URL 中保留链路本地地址所需的接口 scope。
 
 ## 首次部署
 

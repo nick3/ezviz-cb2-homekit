@@ -19,13 +19,22 @@ import tls_config  # noqa: E402
 def test_subject_alt_names_include_listener_and_discovered_addresses() -> None:
     names = tls_config._subject_alt_names(
         "192.168.50.10",
-        ["192.168.50.11", "0.0.0.0", "invalid address"],
+        [
+            "192.168.50.11",
+            "fd12::10",
+            "fe80::1%eth0",
+            "0.0.0.0",
+            "invalid address",
+        ],
     )
 
     assert "DNS:localhost" in names
     assert "IP:127.0.0.1" in names
     assert "IP:192.168.50.10" in names
     assert "IP:192.168.50.11" in names
+    assert "IP:fd12::10" in names
+    assert "IP:fe80::1" in names
+    assert all("%" not in name for name in names)
     assert all("0.0.0.0" not in name for name in names)
 
 
