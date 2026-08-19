@@ -81,6 +81,37 @@ def _validate_certificate_lifetime(certificate: Path, openssl_bin: str) -> None:
     )
 
 
+def _validate_certificate_subject_alt_names(
+    certificate: Path,
+    required_alt_names: Iterable[str],
+    openssl_bin: str,
+) -> None:
+    for alt_name in required_alt_names:
+        kind, value = alt_name.split(":", 1)
+        if kind == "DNS":
+            option = "-checkhost"
+        elif kind == "IP":
+            option = "-checkip"
+        else:
+            raise ValueError(f"不支持的证书 SAN 类型：{kind}")
+        subprocess.run(  # noqa: S603 - executable is an absolute verified file
+            [
+                openssl_bin,
+                "x509",
+                "-noout",
+                option,
+                value,
+                "-in",
+                str(certificate),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+
+
 def _fingerprint(certificate: Path) -> str:
     pem = certificate.read_text(encoding="ascii")
     der = ssl.PEM_cert_to_DER_cert(pem)
@@ -107,12 +138,18 @@ def ensure_tls_certificate(
     if not Path(executable).is_file() or not os.access(executable, os.X_OK):
         raise TLSConfigError("没有找到 openssl，无法安全启动 Web 配置向导")
 
+    required_alt_names = _subject_alt_names(host, addresses)
     if certificate.is_file() and private_key.is_file():
         try:
             _private_mode(certificate)
             _private_mode(private_key)
             _validate_pair(certificate, private_key)
             _validate_certificate_lifetime(certificate, executable)
+            _validate_certificate_subject_alt_names(
+                certificate,
+                required_alt_names,
+                executable,
+            )
             return TLSMaterial(
                 certificate,
                 private_key,
@@ -126,13 +163,13 @@ def ensure_tls_certificate(
             subprocess.CalledProcessError,
             subprocess.TimeoutExpired,
         ):
-            # Regenerate a mismatched, truncated, expired, or expiring pair.
+            # Regenerate a mismatched, truncated, expiring, or stale-SAN pair.
             pass
 
     suffix = secrets.token_hex(8)
     temporary_certificate = data_dir / f".{CERTIFICATE_FILE_NAME}.{suffix}.tmp"
     temporary_key = data_dir / f".{PRIVATE_KEY_FILE_NAME}.{suffix}.tmp"
-    alt_names = ",".join(_subject_alt_names(host, addresses))
+    alt_names = ",".join(required_alt_names)
     command = [
         executable,
         "req",

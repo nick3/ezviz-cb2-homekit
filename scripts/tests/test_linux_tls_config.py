@@ -97,3 +97,52 @@ def test_tls_identity_is_renewed_before_expiry(
     assert renewed.created is True
     assert renewed.certificate.read_bytes() != certificate
     assert renewed.private_key.read_bytes() != private_key
+
+
+@pytest.mark.parametrize(
+    ("first_host", "first_addresses", "next_host", "next_addresses"),
+    [
+        ("0.0.0.0", ["192.168.50.10"], "0.0.0.0", ["192.168.50.11"]),
+        ("setup-old.example", [], "setup-new.example", []),
+    ],
+)
+def test_tls_identity_is_renewed_when_required_sans_change(
+    tmp_path: Path,
+    first_host: str,
+    first_addresses: list[str],
+    next_host: str,
+    next_addresses: list[str],
+) -> None:
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        pytest.skip("openssl is required by the Linux runtime image")
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(mode=0o700)
+
+    first = tls_config.ensure_tls_certificate(
+        data_dir,
+        host=first_host,
+        addresses=first_addresses,
+        openssl_bin=openssl,
+    )
+    certificate = first.certificate.read_bytes()
+    private_key = first.private_key.read_bytes()
+
+    renewed = tls_config.ensure_tls_certificate(
+        data_dir,
+        host=next_host,
+        addresses=next_addresses,
+        openssl_bin=openssl,
+    )
+
+    assert renewed.created is True
+    assert renewed.certificate.read_bytes() != certificate
+    assert renewed.private_key.read_bytes() != private_key
+    reused = tls_config.ensure_tls_certificate(
+        data_dir,
+        host=next_host,
+        addresses=next_addresses,
+        openssl_bin=openssl,
+    )
+    assert reused.created is False
+    assert reused.fingerprint == renewed.fingerprint
