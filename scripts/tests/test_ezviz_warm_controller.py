@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import stat
@@ -222,6 +223,70 @@ def test_warm_consumer_handles_mains_and_timed_preheat() -> None:
     assert processes[2].terminated is True
 
 
+def test_warm_consumer_close_is_terminal() -> None:
+    processes: list[FakeProcess] = []
+
+    def fake_popen(_command: list[str], **_: object) -> FakeProcess:
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    warm = controller.WarmConsumer(
+        "/usr/bin/ffmpeg",
+        "rtsp://127.0.0.1:8554/ezviz",
+        popen=fake_popen,
+    )
+    warm.set_mains(True)
+    warm.tick()
+    assert len(processes) == 1
+
+    warm.close()
+    warm.set_mains(True)
+    warm.trigger(600)
+    warm.release_event()
+    warm.tick()
+
+    assert processes[0].terminated is True
+    assert len(processes) == 1
+    assert warm.desired() is False
+
+
+def test_activity_tracker_tolerates_short_marker_handover() -> None:
+    activity = controller.ActivityTracker(grace_seconds=30)
+    assert activity.update(True, 100.0) is True
+    assert activity.update(False, 129.0) is True
+    assert activity.update(False, 131.0) is False
+
+
+class FakeNativeMqtt:
+    def __init__(self, connected: bool) -> None:
+        self.connected = connected
+
+    def is_connected(self) -> bool:
+        return self.connected
+
+
+class FakeMqtt:
+    def __init__(self, connected: bool) -> None:
+        self.mqtt_client = FakeNativeMqtt(connected)
+
+
+def test_mqtt_disconnect_enables_polling_before_connection_rebuild() -> None:
+    mqtt = FakeMqtt(False)
+    assert controller._mqtt_fallback_due(mqtt, 100.0, 109.0) is False
+    assert controller._mqtt_fallback_due(mqtt, 100.0, 110.0) is True
+
+    mqtt.mqtt_client.connected = True
+    assert controller._mqtt_fallback_due(mqtt, 100.0, 200.0) is False
+    assert controller._mqtt_fallback_due(None, None, 200.0) is True
+
+
+def test_signal_return_codes_are_normalized() -> None:
+    assert controller._normalized_returncode(None) == 0
+    assert controller._normalized_returncode(7) == 7
+    assert controller._normalized_returncode(-15) == 143
+
+
 def test_activity_marker_is_private_and_process_scoped(tmp_path: Path) -> None:
     marker = tmp_path / "active.json"
     assert probe._mark_stream_active(marker) is True
@@ -234,3 +299,19 @@ def test_activity_marker_is_private_and_process_scoped(tmp_path: Path) -> None:
     marker.write_text(f'{{"pid":{os.getpid()}}}', encoding="utf-8")
     probe._clear_stream_active(marker)
     assert marker.exists() is False
+
+
+def test_activity_marker_can_be_reasserted_after_overlapping_process_exits(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "active.json"
+    assert probe._refresh_stream_active(marker, pid=101) is True
+    assert json.loads(marker.read_text())["pid"] == 101
+
+    assert probe._refresh_stream_active(marker, pid=202) is True
+    assert json.loads(marker.read_text())["pid"] == 202
+    probe._clear_stream_active(marker, pid=202)
+    assert marker.exists() is False
+
+    assert probe._refresh_stream_active(marker, pid=101) is True
+    assert json.loads(marker.read_text())["pid"] == 101

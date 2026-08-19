@@ -24,6 +24,7 @@ initialize_config() {
     python3 "${config_tool}" init --template "${template}" --target "${config_file}"
     echo "已生成新的 HomeKit 身份；需要配对时运行 ./manage.sh pin 查看配对码。"
   fi
+  python3 "${config_tool}" upgrade --template "${template}" --target "${config_file}"
   chmod 600 "${config_file}"
 }
 

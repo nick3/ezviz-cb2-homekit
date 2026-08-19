@@ -43,6 +43,9 @@ PRELOAD_PROFILES = {
         "HomeKit H.264/Opus",
     ),
 }
+ACTIVITY_GRACE_SECONDS = 30
+MQTT_FALLBACK_GRACE_SECONDS = 10
+MQTT_RECREATE_SECONDS = 120
 
 
 def _report(message: str) -> None:
@@ -237,6 +240,23 @@ def activity_is_live(path: Path) -> bool:
         return False
 
 
+class ActivityTracker:
+    """Mask short shared-marker handovers without hiding a stopped source."""
+
+    def __init__(self, grace_seconds: float = ACTIVITY_GRACE_SECONDS) -> None:
+        self.grace_seconds = grace_seconds
+        self._last_live_at: float | None = None
+
+    def update(self, marker_live: bool, now: float) -> bool:
+        if marker_live:
+            self._last_live_at = now
+            return True
+        return (
+            self._last_live_at is not None
+            and now - self._last_live_at <= self.grace_seconds
+        )
+
+
 class WarmConsumer:
     """Maintain one low-overhead local RTSP consumer for mains/PIR preloading."""
 
@@ -259,6 +279,7 @@ class WarmConsumer:
         self._event_deadline = 0.0
         self._retry_at = 0.0
         self._process: subprocess.Popen[bytes] | None = None
+        self._closed = False
 
     def _command(self) -> list[str]:
         return [
@@ -284,10 +305,14 @@ class WarmConsumer:
 
     def set_mains(self, enabled: bool) -> None:
         with self._lock:
+            if self._closed:
+                return
             self._mains = enabled
 
     def trigger(self, seconds: int) -> None:
         with self._lock:
+            if self._closed:
+                return
             self._event_deadline = max(
                 self._event_deadline,
                 self._monotonic() + seconds,
@@ -296,15 +321,21 @@ class WarmConsumer:
     def release_event(self) -> None:
         """Hand an established event stream to go2rtc's linger window."""
         with self._lock:
+            if self._closed:
+                return
             self._event_deadline = 0.0
 
     def desired(self, now: float | None = None) -> bool:
         with self._lock:
             current = self._monotonic() if now is None else now
-            return self._mains or current < self._event_deadline
+            return not self._closed and (
+                self._mains or current < self._event_deadline
+            )
 
     def tick(self) -> None:
         with self._lock:
+            if self._closed:
+                return
             now = self._monotonic()
             desired = self._mains or now < self._event_deadline
             if self._process is not None and self._process.poll() is not None:
@@ -343,6 +374,7 @@ class WarmConsumer:
 
     def close(self) -> None:
         with self._lock:
+            self._closed = True
             self._mains = False
             self._event_deadline = 0
             self._stop_locked()
@@ -377,6 +409,33 @@ def _close_cloud(client: Any | None, mqtt: Any | None) -> None:
             pass
 
 
+def _mqtt_is_connected(mqtt: Any | None) -> bool:
+    if mqtt is None:
+        return False
+    native = getattr(mqtt, "mqtt_client", None)
+    checker = getattr(native, "is_connected", None)
+    if not callable(checker):
+        return False
+    try:
+        return bool(checker())
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _mqtt_fallback_due(
+    mqtt: Any | None,
+    offline_since: float | None,
+    now: float,
+) -> bool:
+    if mqtt is None:
+        return True
+    return (
+        not _mqtt_is_connected(mqtt)
+        and offline_since is not None
+        and now - offline_since >= MQTT_FALLBACK_GRACE_SECONDS
+    )
+
+
 def run_strategy(
     args: argparse.Namespace,
     stop: threading.Event,
@@ -388,6 +447,7 @@ def run_strategy(
     warm.set_mains(current_mode == "mains")
     client: Any | None = None
     mqtt: Any | None = None
+    mqtt_offline_since: float | None = None
     next_client_attempt = 0.0
     next_status = 0.0
     next_mqtt_attempt = 0.0
@@ -397,6 +457,7 @@ def run_strategy(
     mode_reported = False
     poll_reported = False
     poller = PirMessagePoller()
+    activity = ActivityTracker()
 
     transcode_label = (
         "HomeKit 按需转码"
@@ -428,6 +489,7 @@ def run_strategy(
                         if current_mode == "mains" and mqtt is not None:
                             _close_mqtt(client, mqtt)
                             mqtt = None
+                            mqtt_offline_since = None
                         if current_mode == "battery":
                             poller.reset()
                             next_alarm_poll = 0
@@ -459,6 +521,7 @@ def run_strategy(
                         _close_cloud(client, mqtt)
                         client = None
                         mqtt = None
+                        mqtt_offline_since = None
                         next_client_attempt = now + 30
                         if args.power_mode == "auto" and current_mode != "battery":
                             current_mode = "battery"
@@ -478,9 +541,12 @@ def run_strategy(
                 try:
                     mqtt = client.get_mqtt_client(messages.put)
                     mqtt.connect(clean_session=True)
+                    mqtt_offline_since = None
+                    poll_reported = False
                     _report("PIR 云推送监听已连接。")
                 except BaseException as error:
                     mqtt = None
+                    mqtt_offline_since = None
                     try:
                         client.mqtt_client = None
                     except BaseException:
@@ -490,11 +556,23 @@ def run_strategy(
                     suffix = f"HTTP {status}" if status is not None else type(error).__name__
                     _report(f"PIR 推送监听不可用（{suffix}），改用告警轮询。")
 
+            if mqtt is not None:
+                if _mqtt_is_connected(mqtt):
+                    mqtt_offline_since = None
+                elif mqtt_offline_since is None:
+                    mqtt_offline_since = now
+                elif now - mqtt_offline_since >= MQTT_RECREATE_SECONDS:
+                    _close_mqtt(client, mqtt)
+                    mqtt = None
+                    mqtt_offline_since = None
+                    next_mqtt_attempt = now + 30
+                    _report("PIR 推送长时间离线，将重建连接并保持告警轮询。")
+
             if (
                 args.pir_preheat
                 and current_mode == "battery"
                 and client is not None
-                and mqtt is None
+                and _mqtt_fallback_due(mqtt, mqtt_offline_since, now)
                 and now >= next_alarm_poll
             ):
                 try:
@@ -536,14 +614,13 @@ def run_strategy(
 
             warm.tick()
 
-            active = activity_is_live(args.activity_file)
+            active = activity.update(activity_is_live(args.activity_file), now)
             if current_mode == "battery" and active:
                 # The temporary event consumer only needs to establish media.
                 # Once the source is live, go2rtc's linger timer owns the full
                 # warm window; otherwise PIR preheat would consume two windows.
                 warm.release_event()
                 warm.tick()
-            if current_mode == "battery" and active:
                 if next_awake_refresh == 0:
                     # The stream source already sends one awake request during startup.
                     next_awake_refresh = now + awake_refresh
@@ -615,6 +692,12 @@ def _arguments() -> argparse.Namespace:
     return args
 
 
+def _normalized_returncode(returncode: int | None) -> int:
+    """Map signal termination to the conventional shell exit status."""
+    code = int(returncode or 0)
+    return 128 - code if code < 0 else code
+
+
 def main() -> int:
     args = _arguments()
     stop = threading.Event()
@@ -650,7 +733,7 @@ def main() -> int:
                 except subprocess.TimeoutExpired:
                     child.kill()
                     child.wait(timeout=5)
-        return int(child.returncode or 0)
+        return _normalized_returncode(child.returncode)
     finally:
         stop.set()
         warm.close()

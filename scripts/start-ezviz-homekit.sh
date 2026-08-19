@@ -75,6 +75,21 @@ if [[ "$(stat -f '%Lp' "$token_file")" != "600" ]]; then
   exit 1
 fi
 
+ffmpeg_bin="${FFMPEG_BIN:-}"
+if [[ -z "$ffmpeg_bin" ]]; then
+  ffmpeg_bin="$(command -v ffmpeg || true)"
+fi
+ffprobe_bin="${FFPROBE_BIN:-}"
+if [[ -z "$ffprobe_bin" ]]; then
+  ffprobe_bin="$(command -v ffprobe || true)"
+fi
+if [[ ! -x "$ffmpeg_bin" ]] || [[ ! -x "$ffprobe_bin" ]]; then
+  echo "缺少可执行的 FFmpeg/ffprobe，无法建立或验证 CB2 媒体链路。" >&2
+  exit 1
+fi
+export FFMPEG_BIN="$ffmpeg_bin"
+export FFPROBE_BIN="$ffprobe_bin"
+
 if lsof -nP -iTCP:1984 -sTCP:LISTEN 2>/dev/null | grep -q .; then
   echo "端口 1984 已被占用；请先停止现有 go2rtc 实例。" >&2
   exit 1
@@ -134,7 +149,7 @@ export EZVIZ_LINGER="${warm_seconds}s"
   --serial "$ezviz_serial" \
   --token-file "$token_file" \
   --activity-file "$activity_file" \
-  --ffmpeg-bin /opt/homebrew/bin/ffmpeg \
+  --ffmpeg-bin "$ffmpeg_bin" \
   --warm-seconds "$warm_seconds" \
   --power-mode "$power_mode" \
   --homekit-transcode "$homekit_transcode" \

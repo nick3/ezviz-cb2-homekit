@@ -85,3 +85,20 @@ func TestLingerIsCancelledByNewConsumer(t *testing.T) {
 	stream.SetLinger(0)
 	stream.RemoveConsumer(replacement)
 }
+
+func TestFailedConsumerRestoresLingerWindow(t *testing.T) {
+	stream, producer, consumer := newLingerTestStream(t, 100*time.Millisecond)
+	stream.RemoveConsumer(consumer)
+	require.True(t, producerConnected(producer))
+
+	incompatible := probe.Create("incompatible", url.Values{"video": {"h265"}})
+	require.Error(t, stream.AddConsumer(incompatible))
+	require.True(t, producerConnected(producer))
+
+	stream.mu.Lock()
+	require.NotNil(t, stream.stopTimer)
+	stream.mu.Unlock()
+	require.Eventually(t, func() bool {
+		return !producerConnected(producer)
+	}, time.Second, 5*time.Millisecond)
+}

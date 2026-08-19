@@ -87,6 +87,11 @@ HomeKit 配对和当前设备配置都不会进入这个压缩包；需要保留
 取流并可能唤醒电池摄像头；容器自身的周期健康检查只检查本地端口。启用
 PIR 预热后，匹配本机序列号的移动/人体告警也会触发一次限时取流。
 
+升级已有部署时，启动入口会检查持久化配置版本。旧版受管配置会自动换成
+当前模板，同时保留完整 `homekit` 段、配对身份和配对列表；原文件会以权限
+`0600` 备份为 `data/go2rtc.yaml.pre-v2.bak`。该备份同样包含 HomeKit 状态，
+不得提交到 Git 或通过不安全渠道传输。
+
 在 Apple“家庭”中选择“添加配件 → 更多选项 → EZVIZ CB2”，输入 `pin`
 命令显示的配对码。常用维护命令：
 
@@ -124,10 +129,10 @@ PIR 预热后，匹配本机序列号的移动/人体告警也会触发一次限
 ```dotenv
 EZVIZ_POWER_MODE=auto          # auto、mains 或 battery
 EZVIZ_HOMEKIT_TRANSCODE=on_demand # on_demand 或 continuous
-EZVIZ_WARM_SECONDS=600         # 退出后保温和 PIR 预热时长
+EZVIZ_WARM_SECONDS=600         # 60–86400 秒；默认 10 分钟
 EZVIZ_PIR_PREHEAT=on           # 不需要任何事件提前预热时设为 off
-EZVIZ_PIR_POLL_SECONDS=15      # 推送不可用时的备用轮询周期
-EZVIZ_POWER_REFRESH_SECONDS=300
+EZVIZ_PIR_POLL_SECONDS=15      # 5–300 秒；推送不可用时的备用轮询周期
+EZVIZ_POWER_REFRESH_SECONDS=300 # 不小于 30 秒
 ```
 
 仅当摄像头确实持续连接 5V 电源但固件误报时才强制设为 `mains`；纯电池设备

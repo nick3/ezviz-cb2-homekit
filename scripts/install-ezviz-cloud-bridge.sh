@@ -24,6 +24,30 @@ if [[ ! -x "$runtime_python" ]]; then
   exit 1
 fi
 
+ffmpeg_bin="${FFMPEG_BIN:-}"
+if [[ -z "$ffmpeg_bin" ]]; then
+  ffmpeg_bin="$(command -v ffmpeg || true)"
+fi
+ffprobe_bin="${FFPROBE_BIN:-}"
+if [[ -z "$ffprobe_bin" ]]; then
+  ffprobe_bin="$(command -v ffprobe || true)"
+fi
+if [[ ! -x "$ffmpeg_bin" ]] || [[ ! -x "$ffprobe_bin" ]]; then
+  echo "缺少可执行的 FFmpeg/ffprobe，无法建立或验证 CB2 媒体链路。" >&2
+  exit 1
+fi
+export FFMPEG_BIN="$ffmpeg_bin"
+export FFPROBE_BIN="$ffprobe_bin"
+
+go_bin="${GO_BIN:-}"
+if [[ -z "$go_bin" ]]; then
+  go_bin="$(command -v go || true)"
+fi
+if [[ ! -x "$go_bin" ]]; then
+  echo "缺少 Go 工具链，无法构建 go2rtc。" >&2
+  exit 1
+fi
+
 if [[ ! -d "$dependency_dir/.git" ]]; then
   git clone --filter=blob:none "$dependency_repo" "$dependency_dir"
   git -C "$dependency_dir" checkout --quiet --detach "$dependency_commit"
@@ -74,15 +98,15 @@ fi
   "$project_dir/scripts/tests/test_ezviz_warm_controller.py" \
   "$project_dir/scripts/tests/test_linux_config_tool.py"
 
-if [[ ! -x /opt/homebrew/bin/ffmpeg ]] || [[ ! -x /opt/homebrew/bin/ffprobe ]]; then
-  echo "缺少 FFmpeg/ffprobe，无法建立或验证 CB2 媒体链路。" >&2
-  exit 1
-fi
-
 (
   cd "$project_dir"
-  GOCACHE="$project_dir/.tmp/go-build-cache" go test ./internal/homekit ./internal/streams
-  GOCACHE="$project_dir/.tmp/go-build-cache" go build -o "$go2rtc_binary" .
+  GOCACHE="$project_dir/.tmp/go-build-cache" "$go_bin" test \
+    ./internal/homekit ./internal/streams
+  # The wider upstream ffmpeg suite contains OS-specific golden strings. Gate
+  # the exact H.264/Opus producer path used by this HomeKit bridge on every Mac.
+  GOCACHE="$project_dir/.tmp/go-build-cache" "$go_bin" test \
+    ./internal/ffmpeg -run '^TestHomeKitTranscodeArgs$'
+  GOCACHE="$project_dir/.tmp/go-build-cache" "$go_bin" build -o "$go2rtc_binary" .
 )
 
 echo "CB2 局域网反向直连适配器和 HomeKit 桥接依赖均已安装并通过测试。"

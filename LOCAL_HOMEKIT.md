@@ -60,9 +60,22 @@ CB2 私网 IP → 反向直连 TCP → 私有帧拆包 → MPEG-TS → go2rtc �
 直连失败时会明确失败，不会悄悄切回 VTM/VTDU。
 
 默认使用自适应预热：设备明确报告持续供电时保持局域网流常驻；其余情况按
-纯电池处理，最后一次观看后保温 600 秒，并监听 PIR/人体告警提前预热。
+纯电池处理，最后一次观看后默认保温 10 分钟（600 秒），并监听 PIR/人体
+告警提前预热。
 固件供电状态误报时可在启动前用 `EZVIZ_POWER_MODE=mains` 或 `battery`
 覆盖；只有确实持续连接 5V 电源时才应强制 `mains`。
+
+macOS 启动脚本支持以下覆盖项：
+
+```bash
+EZVIZ_WARM_SECONDS=600          # 60–86400 秒；退出保温与 PIR 预热共用
+EZVIZ_PIR_PREHEAT=on            # on 或 off
+EZVIZ_PIR_POLL_SECONDS=15       # 5–300 秒；推送离线时的轮询周期
+EZVIZ_POWER_REFRESH_SECONDS=300 # 不小于 30 秒
+```
+
+FFmpeg 默认通过 `PATH` 自动查找；自定义安装位置可设置 `FFMPEG_BIN` 和
+`FFPROBE_BIN`。
 
 HomeKit 转码默认按需启动，无人观看时常驻的只是摄像头原始流：
 

@@ -2,7 +2,10 @@
 
 set -euo pipefail
 
-ffprobe_bin="/opt/homebrew/bin/ffprobe"
+ffprobe_bin="${FFPROBE_BIN:-}"
+if [[ -z "$ffprobe_bin" ]]; then
+  ffprobe_bin="$(command -v ffprobe || true)"
+fi
 
 if [[ ! -x "$ffprobe_bin" ]]; then
   echo "缺少 ffprobe，无法检查视频流。" >&2
