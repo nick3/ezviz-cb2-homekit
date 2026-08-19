@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,12 @@ from runtime_settings import (
     token_is_ready,
     token_matches_identity,
 )
-from setup_wizard import DEFAULT_SETUP_HOST, WizardApplication, create_server
+from setup_wizard import (
+    DEFAULT_SETUP_HOST,
+    WizardApplication,
+    _server_host,
+    create_server,
+)
 from tls_config import TLSConfigError, ensure_tls_certificate
 
 RESTART_DELAY_SECONDS = 5.0
@@ -45,6 +50,17 @@ def _runtime_signature(settings_path: Path, token_file: Path) -> tuple[int | Non
         _mtime_ns(token_file),
         _mtime_ns(token_file.with_name(AUTH_STATE_FILE_NAME)),
     )
+
+
+def _setup_urls(host: str, port: int, addresses: Iterable[str]) -> tuple[str, ...]:
+    normalized_host = _server_host(host)
+    targets = addresses if normalized_host in {DEFAULT_SETUP_HOST, "::"} else [host]
+    urls = []
+    for target in targets:
+        address = _server_host(target)
+        url_host = f"[{address.replace('%', '%25')}]" if ":" in address else address
+        urls.append(f"https://{url_host}:{port}")
+    return tuple(urls)
 
 
 def bridge_command(
@@ -318,7 +334,7 @@ def main() -> int:
     )
     template = script_dir / "go2rtc.yaml.tmpl"
     html_file = script_dir / "wizard.html"
-    host = os.environ.get("EZVIZ_SETUP_HOST", DEFAULT_SETUP_HOST).strip()
+    host = _server_host(os.environ.get("EZVIZ_SETUP_HOST", DEFAULT_SETUP_HOST))
     host = host or DEFAULT_SETUP_HOST
     port = _positive_port(os.environ.get("EZVIZ_SETUP_PORT", "8099"))
 
@@ -393,11 +409,10 @@ def main() -> int:
         f"[Web 向导] TLS 证书 SHA-256{created}：{tls.fingerprint}",
         flush=True,
     )
-    display_addresses = addresses if host in {DEFAULT_SETUP_HOST, "::"} else [host]
-    if display_addresses:
-        for address in display_addresses:
-            url_host = f"[{address}]" if ":" in address else address
-            print(f"[Web 向导] https://{url_host}:{port}", flush=True)
+    setup_urls = _setup_urls(host, port, addresses)
+    if setup_urls:
+        for url in setup_urls:
+            print(f"[Web 向导] {url}", flush=True)
     else:
         print(f"[Web 向导] HTTPS 已在端口 {port} 启动。", flush=True)
 

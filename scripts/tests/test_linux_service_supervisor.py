@@ -172,6 +172,27 @@ def test_mtime_returns_none_when_state_path_is_missing(tmp_path: Path) -> None:
     assert isinstance(service_supervisor._mtime_ns(missing), int)
 
 
+@pytest.mark.parametrize(
+    ("host", "addresses", "expected"),
+    [
+        ("[fd12::10]", ["192.168.50.10"], ("https://[fd12::10]:8099",)),
+        (
+            "[fe80::1%eth0]",
+            ["192.168.50.10"],
+            ("https://[fe80::1%25eth0]:8099",),
+        ),
+        ("[::]", ["192.168.50.10"], ("https://192.168.50.10:8099",)),
+        ("[0.0.0.0]", ["192.168.50.10"], ("https://192.168.50.10:8099",)),
+    ],
+)
+def test_setup_urls_normalize_bracketed_and_wildcard_hosts(
+    host: str,
+    addresses: list[str],
+    expected: tuple[str, ...],
+) -> None:
+    assert service_supervisor._setup_urls(host, 8099, addresses) == expected
+
+
 def test_runtime_signature_ignores_homekit_pairing_config_writes(
     tmp_path: Path,
 ) -> None:
