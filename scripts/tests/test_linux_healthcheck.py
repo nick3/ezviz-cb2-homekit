@@ -18,7 +18,9 @@ import healthcheck  # noqa: E402
 
 def test_healthcheck_uses_the_configured_listener_address() -> None:
     assert healthcheck.healthcheck_host("0.0.0.0") == "127.0.0.1"
+    assert healthcheck.healthcheck_host("[0.0.0.0]") == "127.0.0.1"
     assert healthcheck.healthcheck_host("::") == "::1"
+    assert healthcheck.healthcheck_host("[::]") == "::1"
     assert healthcheck.healthcheck_host("192.168.50.10") == "192.168.50.10"
     assert healthcheck.healthcheck_host("[fd12::10]") == "fd12::10"
     assert healthcheck.healthcheck_hosts("fe80::1%eth0") == (

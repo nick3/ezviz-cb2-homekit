@@ -16,11 +16,13 @@ WILDCARD_IPV4 = "0.0.0.0"  # noqa: S104 - sentinel only; this module never binds
 
 def healthcheck_host(value: str) -> str:
     host = value.strip()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
     if not host or host == WILDCARD_IPV4:
         return "127.0.0.1"
     if host == "::":
         return "::1"
-    return host.strip("[]")
+    return host
 
 
 def healthcheck_hosts(value: str) -> tuple[str, str]:
