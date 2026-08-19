@@ -185,12 +185,15 @@ def test_mtime_returns_none_when_state_path_is_missing(tmp_path: Path) -> None:
             "[::]",
             ["192.168.50.10", "fd12::10", "fe80::1%eth0"],
             (
-                "https://192.168.50.10:8099",
                 "https://[fd12::10]:8099",
                 "https://[fe80::1%25eth0]:8099",
             ),
         ),
-        ("[0.0.0.0]", ["192.168.50.10"], ("https://192.168.50.10:8099",)),
+        (
+            "[0.0.0.0]",
+            ["192.168.50.10", "fd12::10", "fe80::1%eth0"],
+            ("https://192.168.50.10:8099",),
+        ),
     ],
 )
 def test_setup_urls_normalize_bracketed_and_wildcard_hosts(

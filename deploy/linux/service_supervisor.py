@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import signal
 import subprocess
@@ -54,7 +55,19 @@ def _runtime_signature(settings_path: Path, token_file: Path) -> tuple[int | Non
 
 def _setup_urls(host: str, port: int, addresses: Iterable[str]) -> tuple[str, ...]:
     normalized_host = _server_host(host)
-    targets = addresses if normalized_host in {DEFAULT_SETUP_HOST, "::"} else [host]
+    if normalized_host in {DEFAULT_SETUP_HOST, "::"}:
+        expected_version = 4 if normalized_host == DEFAULT_SETUP_HOST else 6
+        targets = []
+        for target in addresses:
+            value = _server_host(target).split("%", 1)[0]
+            try:
+                address = ipaddress.ip_address(value)
+            except ValueError:
+                continue
+            if address.version == expected_version:
+                targets.append(target)
+    else:
+        targets = [host]
     urls = []
     for target in targets:
         address = _server_host(target)
