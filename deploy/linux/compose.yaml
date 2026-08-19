@@ -9,6 +9,7 @@ services:
     stop_grace_period: 15s
     environment:
       EZVIZ_DATA_DIR: /data
+      EZVIZ_LEGACY_DATA_DIR: /legacy-data
       EZVIZ_SETUP_HOST: "${EZVIZ_SETUP_HOST:-0.0.0.0}"
       EZVIZ_SETUP_PORT: "${EZVIZ_SETUP_PORT:-8099}"
       EZVIZ_SERIAL: "${EZVIZ_SERIAL:-}"
@@ -28,6 +29,7 @@ services:
     user: "${PUID:-1000}:${PGID:-1000}"
     volumes:
       - ezviz-data:/data
+      - ./data:/legacy-data:ro
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m

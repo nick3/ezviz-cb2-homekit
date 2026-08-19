@@ -15,6 +15,7 @@ from pathlib import Path
 
 PIN_MARKER = "__HOMEKIT_PIN__"
 AUTH_STATE_FILE_NAME = "ezviz_auth.json"
+LEGACY_MIGRATION_MARKER = ".legacy-bind-migration.json"
 CONFIG_VERSION = 3
 CONFIG_VERSION_LINE = f"# ezviz-cb2-config-version: {CONFIG_VERSION}"
 CURRENT_CONFIG_MARKERS = (
@@ -43,6 +44,7 @@ PIN_LINE = re.compile(
     r"(?m)^[ \t]+pin:[ \t]*(?P<quote>[\"']?)"
     r"(?P<pin>[0-9]{3}-[0-9]{2}-[0-9]{3})(?P=quote)[ \t]*(?:#.*)?$"
 )
+SERIAL_PATTERN = re.compile(r"^[A-Za-z0-9_-]{7,64}$")
 
 
 def _arguments() -> argparse.Namespace:
@@ -155,6 +157,24 @@ def _validate_token(path: Path) -> bytes:
     return raw
 
 
+def _regular_file(path: Path, label: str) -> None:
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(f"{label} must be a regular file, not a symlink")
+
+
+def _private_json(path: Path, label: str) -> tuple[bytes, dict[str, object]]:
+    _regular_file(path, label)
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode != 0o600:
+        raise RuntimeError(f"{label} permissions must be 0600, currently {mode:03o}")
+    raw = path.read_bytes()
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{label} must contain a JSON object")
+    return raw, value
+
+
 def _homekit_pin(homekit: str) -> str:
     match = PIN_LINE.search(homekit)
     if match is None:
@@ -191,6 +211,160 @@ def upgrade_config(template: Path, target: Path) -> bool:
     migrated = _replace_section(migrated, "homekit", homekit)
     _secure_backup(target, source_config.encode())
     _secure_write(target, migrated.encode())
+    return True
+
+
+def _legacy_marker_payload(
+    source_config: bytes,
+    source_token: bytes | None,
+    serial: str,
+) -> bytes:
+    value = {
+        "version": 1,
+        "config_sha256": hashlib.sha256(source_config).hexdigest(),
+        "token_sha256": (
+            hashlib.sha256(source_token).hexdigest() if source_token is not None else ""
+        ),
+        "serial": serial,
+    }
+    return json.dumps(value, sort_keys=True).encode("utf-8") + b"\n"
+
+
+def migrate_legacy_bind_state(
+    source_dir: Path,
+    target_dir: Path,
+    serial: str,
+) -> bool:
+    """Move the old ./data bind state into an empty named volume once.
+
+    The legacy login command verified the configured serial before saving its token,
+    so a token without the newer auth sidecar may be bound only to that validated
+    legacy environment value. The HomeKit config is the final commit marker: token
+    and auth state are written first, preventing a crash from exposing a new identity.
+    """
+
+    target_config = target_dir / "go2rtc.yaml"
+    target_token = target_dir / "ezviz_token.json"
+    target_auth = target_dir / AUTH_STATE_FILE_NAME
+    marker = target_dir / LEGACY_MIGRATION_MARKER
+    if target_config.exists():
+        if marker.exists():
+            _regular_file(marker, "Legacy migration marker")
+            marker.unlink()
+        return False
+
+    source_config_path = source_dir / "go2rtc.yaml"
+    try:
+        _regular_file(source_config_path, "Legacy HomeKit config")
+    except FileNotFoundError:
+        return False
+
+    source_config = source_config_path.read_bytes()
+    source_text = source_config.decode("utf-8")
+    _homekit_pin(_section(source_text, "homekit"))
+
+    source_token_path = source_dir / "ezviz_token.json"
+    source_auth_path = source_dir / AUTH_STATE_FILE_NAME
+    source_token: bytes | None = None
+    source_auth: bytes | None = None
+    token_value: dict[str, object] | None = None
+    try:
+        source_token, token_value = _private_json(
+            source_token_path, "Legacy EZVIZ token"
+        )
+    except FileNotFoundError:
+        if source_auth_path.exists():
+            raise RuntimeError("Legacy auth binding exists without its EZVIZ token")
+
+    normalized_serial = serial.strip().upper()
+    serial_is_valid = bool(normalized_serial) and bool(
+        SERIAL_PATTERN.fullmatch(normalized_serial)
+    )
+    if token_value is not None and not token_value.get("session_id"):
+        raise RuntimeError("Legacy EZVIZ token does not contain a usable session")
+
+    try:
+        source_auth, auth_value = _private_json(
+            source_auth_path, "Legacy EZVIZ auth binding"
+        )
+    except FileNotFoundError:
+        auth_value = None
+    if auth_value is not None:
+        bound_serial = str(auth_value.get("serial") or "").strip().upper()
+        if bound_serial and SERIAL_PATTERN.fullmatch(bound_serial) is None:
+            raise RuntimeError("Legacy EZVIZ auth binding has an invalid serial")
+        if bound_serial and serial_is_valid and bound_serial != normalized_serial:
+            raise RuntimeError("Legacy EZVIZ auth binding does not match EZVIZ_SERIAL")
+
+    marker_payload = _legacy_marker_payload(
+        source_config,
+        source_token,
+        normalized_serial if serial_is_valid else "",
+    )
+    target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    target_dir.chmod(0o700)
+    entries = {path.name for path in target_dir.iterdir()}
+    resumable_entries = {
+        LEGACY_MIGRATION_MARKER,
+        target_token.name,
+        target_auth.name,
+    }
+    temporary_entries = {
+        f".{LEGACY_MIGRATION_MARKER}.tmp",
+        f".{target_config.name}.tmp",
+        f".{target_token.name}.tmp",
+        f".{target_auth.name}.tmp",
+    }
+    if marker.exists():
+        existing_marker, _ = _private_json(marker, "Legacy migration marker")
+        if entries - resumable_entries - temporary_entries:
+            raise RuntimeError(
+                "Named volume contains unrelated state; refusing legacy migration"
+            )
+        for name in temporary_entries:
+            (target_dir / name).unlink(missing_ok=True)
+        if existing_marker != marker_payload:
+            target_token.unlink(missing_ok=True)
+            target_auth.unlink(missing_ok=True)
+            _secure_write(marker, marker_payload)
+    elif entries - temporary_entries:
+        raise RuntimeError(
+            "Named volume is not empty; refusing to overwrite it with legacy state"
+        )
+    else:
+        for name in temporary_entries:
+            (target_dir / name).unlink(missing_ok=True)
+        _secure_write(marker, marker_payload)
+
+    try:
+        if source_token is not None:
+            _secure_write(target_token, source_token)
+            if source_auth is not None:
+                _secure_write(target_auth, source_auth)
+            else:
+                auth_state = {
+                    "state": (
+                        "legacy_upgrade" if serial_is_valid else "unbound_import"
+                    ),
+                    "serial": normalized_serial if serial_is_valid else "",
+                }
+                _secure_write(
+                    target_auth,
+                    json.dumps(
+                        auth_state,
+                        ensure_ascii=False,
+                        indent=2,
+                    ).encode("utf-8")
+                    + b"\n",
+                )
+        _secure_write(target_config, source_config)
+        marker.unlink()
+    except BaseException:
+        target_config.unlink(missing_ok=True)
+        target_token.unlink(missing_ok=True)
+        target_auth.unlink(missing_ok=True)
+        marker.unlink(missing_ok=True)
+        raise
     return True
 
 

@@ -320,3 +320,26 @@ def test_recoverable_initialization_errors_are_reported_not_raised(
     assert ready is False
     assert reason == message
     assert supervisor.status()["state"] == "error"
+
+
+def test_main_fails_before_generating_identity_when_legacy_migration_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir = tmp_path / "named-volume"
+    legacy_dir = tmp_path / "legacy"
+    legacy_dir.mkdir()
+    monkeypatch.setenv("EZVIZ_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("EZVIZ_LEGACY_DATA_DIR", str(legacy_dir))
+
+    def fail_migration(_source: Path, _target: Path, _serial: str) -> bool:
+        raise RuntimeError("unsafe legacy state")
+
+    monkeypatch.setattr(
+        service_supervisor.config_tool,
+        "migrate_legacy_bind_state",
+        fail_migration,
+    )
+
+    assert service_supervisor.main() == 1
+    assert not (data_dir / "go2rtc.yaml").exists()
+    assert not (data_dir / "wizard-key.pem").exists()

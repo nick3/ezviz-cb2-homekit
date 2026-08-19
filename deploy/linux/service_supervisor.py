@@ -314,6 +314,9 @@ def main() -> int:
     )
     template = script_dir / "go2rtc.yaml.tmpl"
     html_file = script_dir / "wizard.html"
+    legacy_data_value = os.environ.get("EZVIZ_LEGACY_DATA_DIR", "").strip()
+    legacy_data_dir = Path(legacy_data_value) if legacy_data_value else None
+    legacy_serial = os.environ.get("EZVIZ_SERIAL", "")
     host = os.environ.get("EZVIZ_SETUP_HOST", DEFAULT_SETUP_HOST).strip()
     host = host or DEFAULT_SETUP_HOST
     port = _positive_port(os.environ.get("EZVIZ_SETUP_PORT", "8099"))
@@ -324,6 +327,24 @@ def main() -> int:
     except OSError as error:
         print(f"[桥接服务] 无法启动：{error}", file=sys.stderr, flush=True)
         return 1
+    if legacy_data_dir is not None:
+        try:
+            if config_tool.migrate_legacy_bind_state(
+                legacy_data_dir,
+                settings_store.data_dir,
+                legacy_serial,
+            ):
+                print(
+                    "[桥接服务] 已从旧版 ./data 目录迁移 HomeKit 身份和萤石会话。",
+                    flush=True,
+                )
+        except (OSError, ValueError, RuntimeError) as error:
+            print(
+                f"[桥接服务] 旧版绑定目录迁移失败：{error}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
     startup_error = _initialize_persistent_state(settings_store, config_file, template)
     addresses = interface_ipv4_addresses()
     try:

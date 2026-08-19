@@ -19,6 +19,21 @@ def _template() -> Path:
     return PROJECT_DIR / "deploy" / "linux" / "go2rtc.yaml.tmpl"
 
 
+def _legacy_config() -> str:
+    return """streams:
+  ezviz:
+    - legacy-source
+homekit:
+  ezviz:
+    name: Existing Camera
+    pin: 321-54-678
+    pairings:
+      - client_id=private
+log:
+  level: info
+"""
+
+
 def test_init_creates_private_config_with_random_pin(tmp_path: Path) -> None:
     target = tmp_path / "data" / "go2rtc.yaml"
 
@@ -178,6 +193,159 @@ log:
         "serial": "",
     }
     assert stat.S_IMODE(auth_state.stat().st_mode) == 0o600
+
+
+def test_legacy_bind_migration_preserves_pairing_and_binds_verified_token(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "legacy"
+    source.mkdir()
+    (source / "go2rtc.yaml").write_text(_legacy_config())
+    source_token = source / "ezviz_token.json"
+    source_token.write_text(json.dumps({"session_id": "private"}))
+    source_token.chmod(0o600)
+    target = tmp_path / "named-volume"
+
+    assert (
+        config_tool.migrate_legacy_bind_state(
+            source,
+            target,
+            "testcb2123456",
+        )
+        is True
+    )
+
+    target_config = target / "go2rtc.yaml"
+    target_token = target / "ezviz_token.json"
+    target_auth = target / config_tool.AUTH_STATE_FILE_NAME
+    assert "client_id=private" in target_config.read_text()
+    assert target_token.read_bytes() == source_token.read_bytes()
+    assert json.loads(target_auth.read_text()) == {
+        "state": "legacy_upgrade",
+        "serial": "TESTCB2123456",
+    }
+    assert stat.S_IMODE(target_config.stat().st_mode) == 0o600
+    assert stat.S_IMODE(target_token.stat().st_mode) == 0o600
+    assert stat.S_IMODE(target_auth.stat().st_mode) == 0o600
+    assert not (target / config_tool.LEGACY_MIGRATION_MARKER).exists()
+
+    assert config_tool.upgrade_config(_template(), target_config) is True
+    upgraded = target_config.read_text()
+    assert config_tool.CONFIG_VERSION_LINE in upgraded
+    assert "client_id=private" in upgraded
+    assert "legacy-source" not in upgraded
+
+
+def test_legacy_bind_migration_is_a_noop_without_old_state(tmp_path: Path) -> None:
+    source = tmp_path / "empty-legacy"
+    source.mkdir()
+    target = tmp_path / "named-volume"
+
+    assert config_tool.migrate_legacy_bind_state(source, target, "") is False
+    assert not target.exists()
+
+
+def test_legacy_bind_migration_never_overwrites_named_volume_state(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "legacy"
+    source.mkdir()
+    (source / "go2rtc.yaml").write_text(_legacy_config())
+    target = tmp_path / "named-volume"
+    target.mkdir()
+    existing_config = target / "go2rtc.yaml"
+    existing_config.write_text("current-state")
+
+    assert (
+        config_tool.migrate_legacy_bind_state(
+            source,
+            target,
+            "TESTCB2123456",
+        )
+        is False
+    )
+    assert existing_config.read_text() == "current-state"
+
+
+def test_legacy_bind_migration_rejects_other_named_volume_state(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "legacy"
+    source.mkdir()
+    (source / "go2rtc.yaml").write_text(_legacy_config())
+    target = tmp_path / "named-volume"
+    target.mkdir()
+    settings = target / "settings.json"
+    settings.write_text('{"serial":"current"}\n')
+
+    with pytest.raises(RuntimeError, match="Named volume is not empty"):
+        config_tool.migrate_legacy_bind_state(
+            source,
+            target,
+            "TESTCB2123456",
+        )
+
+    assert settings.read_text() == '{"serial":"current"}\n'
+    assert not (target / "go2rtc.yaml").exists()
+
+
+def test_legacy_bind_migration_fails_closed_for_an_insecure_token(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "legacy"
+    source.mkdir()
+    (source / "go2rtc.yaml").write_text(_legacy_config())
+    source_token = source / "ezviz_token.json"
+    source_token.write_text(json.dumps({"session_id": "private"}))
+    source_token.chmod(0o644)
+    target = tmp_path / "named-volume"
+
+    with pytest.raises(RuntimeError, match="permissions must be 0600"):
+        config_tool.migrate_legacy_bind_state(
+            source,
+            target,
+            "TESTCB2123456",
+        )
+
+    assert not (target / "go2rtc.yaml").exists()
+    assert not (target / "ezviz_token.json").exists()
+
+
+def test_legacy_bind_migration_recovers_an_interrupted_copy(tmp_path: Path) -> None:
+    source = tmp_path / "legacy"
+    source.mkdir()
+    source_config = _legacy_config().encode()
+    (source / "go2rtc.yaml").write_bytes(source_config)
+    source_token = json.dumps({"session_id": "private"}).encode()
+    token_path = source / "ezviz_token.json"
+    token_path.write_bytes(source_token)
+    token_path.chmod(0o600)
+    target = tmp_path / "named-volume"
+    target.mkdir()
+    marker = target / config_tool.LEGACY_MIGRATION_MARKER
+    marker.write_bytes(
+        config_tool._legacy_marker_payload(
+            source_config,
+            source_token,
+            "TESTCB2123456",
+        )
+    )
+    marker.chmod(0o600)
+    partial_token = target / "ezviz_token.json"
+    partial_token.write_text("partial")
+    partial_token.chmod(0o600)
+
+    assert (
+        config_tool.migrate_legacy_bind_state(
+            source,
+            target,
+            "TESTCB2123456",
+        )
+        is True
+    )
+    assert json.loads(partial_token.read_text()) == {"session_id": "private"}
+    assert (target / "go2rtc.yaml").exists()
+    assert not marker.exists()
 
 
 def test_read_homekit_pin_ignores_other_sections_and_indentation(

@@ -7,6 +7,7 @@ from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 MANAGE = PROJECT_DIR / "deploy" / "linux" / "manage.sh"
+COMPOSE = PROJECT_DIR / "deploy" / "linux" / "compose.yaml"
 
 
 def _run_login(tmp_path: Path, *, shell_port: str = "") -> str:
@@ -35,3 +36,11 @@ def test_login_url_reads_setup_port_from_dotenv(tmp_path: Path) -> None:
 
 def test_shell_setup_port_takes_precedence_over_dotenv(tmp_path: Path) -> None:
     assert "<Linux-IP>:9234" in _run_login(tmp_path, shell_port="9234")
+
+
+def test_compose_preserves_the_old_bind_mount_for_automatic_migration() -> None:
+    compose = COMPOSE.read_text()
+
+    assert "EZVIZ_LEGACY_DATA_DIR: /legacy-data" in compose
+    assert "- ezviz-data:/data" in compose
+    assert "- ./data:/legacy-data:ro" in compose
