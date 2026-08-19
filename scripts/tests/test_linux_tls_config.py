@@ -62,3 +62,38 @@ def test_tls_identity_is_private_valid_and_persistent(tmp_path: Path) -> None:
     assert second.fingerprint == first.fingerprint
     assert second.certificate.read_bytes() == certificate
     assert second.private_key.read_bytes() == private_key
+
+
+def test_tls_identity_is_renewed_before_expiry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        pytest.skip("openssl is required by the Linux runtime image")
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(mode=0o700)
+
+    first = tls_config.ensure_tls_certificate(
+        data_dir,
+        host="0.0.0.0",
+        addresses=["192.168.50.10"],
+        openssl_bin=openssl,
+    )
+    certificate = first.certificate.read_bytes()
+    private_key = first.private_key.read_bytes()
+    monkeypatch.setattr(
+        tls_config,
+        "CERTIFICATE_RENEWAL_SECONDS",
+        826 * 24 * 60 * 60,
+    )
+
+    renewed = tls_config.ensure_tls_certificate(
+        data_dir,
+        host="0.0.0.0",
+        addresses=["192.168.50.10"],
+        openssl_bin=openssl,
+    )
+
+    assert renewed.created is True
+    assert renewed.certificate.read_bytes() != certificate
+    assert renewed.private_key.read_bytes() != private_key

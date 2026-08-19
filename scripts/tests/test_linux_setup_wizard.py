@@ -6,6 +6,7 @@ import ssl
 import stat
 import sys
 import threading
+from collections.abc import Callable
 from http.client import HTTPSConnection
 from pathlib import Path
 from typing import ClassVar
@@ -226,6 +227,64 @@ def test_mfa_completion_failure_closes_and_discards_pending_client(
     assert client.closed is True
     with pytest.raises(setup_wizard.WizardError, match="会话已失效"):
         application.run_login({"sms_code": "123456"})
+
+
+def test_abandoned_mfa_login_is_closed_when_its_timer_expires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeTimer:
+        def __init__(
+            self,
+            interval: float,
+            function: Callable[..., None],
+            args: tuple[object, ...] = (),
+        ) -> None:
+            self.interval = interval
+            self.function = function
+            self.args = args
+            self.daemon = False
+            self.started = False
+            self.cancelled = False
+            timers.append(self)
+
+        def start(self) -> None:
+            self.started = True
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        def fire(self) -> None:
+            self.function(*self.args)
+
+    timers: list[FakeTimer] = []
+
+    monkeypatch.setattr(setup_wizard.threading, "Timer", FakeTimer)
+    coordinator = setup_wizard.LoginCoordinator(
+        tmp_path / "ezviz_token.json",
+        reload_callback=lambda: None,
+        dependencies=(FakeClient, VerificationRequired, ApiError),
+    )
+
+    result = coordinator.begin(
+        account="owner",
+        password="secret",  # noqa: S106 - synthetic test credential
+        serial="TESTCB2123456",
+        region="api.ys7.com",
+    )
+    client = FakeClient.instances[-1]
+    timer = timers[-1]
+
+    assert result["state"] == "sms_required"
+    assert timer.started is True
+    assert timer.daemon is True
+    assert 0 < timer.interval <= setup_wizard.PENDING_LOGIN_SECONDS
+
+    timer.fire()
+
+    assert client.closed is True
+    assert timer.cancelled is True
+    with pytest.raises(setup_wizard.WizardError, match="会话已失效"):
+        coordinator.finish_sms("123456", expected_mode="configured")
 
 
 def test_http_server_requires_csrf_for_mutations_and_reports_status(

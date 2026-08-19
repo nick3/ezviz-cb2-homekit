@@ -227,6 +227,12 @@ def _serialize_settings(settings: Mapping[str, Any]) -> bytes:
     )
 
 
+def _yaml_double_quoted_fragment(value: str) -> str:
+    """Escape a value inserted inside a YAML double-quoted scalar."""
+
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def secure_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.parent.chmod(0o700)
@@ -354,7 +360,7 @@ def bridge_environment(
             "EZVIZ_PIR_POLL_SECONDS": str(normalized["pir_poll_seconds"]),
             "EZVIZ_POWER_REFRESH_SECONDS": str(normalized["power_refresh_seconds"]),
             "EZVIZ_REGION": normalized["region"],
-            "HOMEKIT_NAME": normalized["homekit_name"],
+            "HOMEKIT_NAME": _yaml_double_quoted_fragment(normalized["homekit_name"]),
             "TZ": normalized["timezone"],
             "EZVIZ_DATA_DIR": str(data_dir),
             "EZVIZ_TOKEN_FILE": str(data_dir / "ezviz_token.json"),

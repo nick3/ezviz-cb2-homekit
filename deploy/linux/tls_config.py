@@ -17,6 +17,7 @@ from pathlib import Path
 
 CERTIFICATE_FILE_NAME = "wizard-cert.pem"
 PRIVATE_KEY_FILE_NAME = "wizard-key.pem"
+CERTIFICATE_RENEWAL_SECONDS = 30 * 24 * 60 * 60
 HOSTNAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?")
 WILDCARD_IPV4 = "0.0.0.0"  # noqa: S104 - certificate SAN filtering sentinel.
 
@@ -61,6 +62,25 @@ def _validate_pair(certificate: Path, private_key: Path) -> None:
     context.load_cert_chain(str(certificate), str(private_key))
 
 
+def _validate_certificate_lifetime(certificate: Path, openssl_bin: str) -> None:
+    subprocess.run(  # noqa: S603 - executable is an absolute verified file
+        [
+            openssl_bin,
+            "x509",
+            "-checkend",
+            str(CERTIFICATE_RENEWAL_SECONDS),
+            "-noout",
+            "-in",
+            str(certificate),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+
+
 def _fingerprint(certificate: Path) -> str:
     pem = certificate.read_text(encoding="ascii")
     der = ssl.PEM_cert_to_DER_cert(pem)
@@ -83,24 +103,31 @@ def ensure_tls_certificate(
         if path.is_symlink():
             raise TLSConfigError(f"TLS 文件不能是符号链接：{path}")
 
+    executable = openssl_bin or "/usr/bin/openssl"
+    if not Path(executable).is_file() or not os.access(executable, os.X_OK):
+        raise TLSConfigError("没有找到 openssl，无法安全启动 Web 配置向导")
+
     if certificate.is_file() and private_key.is_file():
         try:
             _private_mode(certificate)
             _private_mode(private_key)
             _validate_pair(certificate, private_key)
+            _validate_certificate_lifetime(certificate, executable)
             return TLSMaterial(
                 certificate,
                 private_key,
                 _fingerprint(certificate),
                 False,
             )
-        except (OSError, ValueError, ssl.SSLError):
-            # Regenerate a mismatched or truncated pair before the server starts.
+        except (
+            OSError,
+            ValueError,
+            ssl.SSLError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ):
+            # Regenerate a mismatched, truncated, expired, or expiring pair.
             pass
-
-    executable = openssl_bin or "/usr/bin/openssl"
-    if not Path(executable).is_file() or not os.access(executable, os.X_OK):
-        raise TLSConfigError("没有找到 openssl，无法安全启动 Web 配置向导")
 
     suffix = secrets.token_hex(8)
     temporary_certificate = data_dir / f".{CERTIFICATE_FILE_NAME}.{suffix}.tmp"

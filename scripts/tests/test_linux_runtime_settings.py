@@ -166,3 +166,22 @@ def test_bridge_environment_keeps_secrets_out_of_settings(tmp_path: Path) -> Non
     joined = " ".join(f"{key}={value}" for key, value in environment.items()).lower()
     assert "password" not in joined
     assert "secret" not in joined
+
+
+def test_bridge_environment_escapes_homekit_name_for_quoted_yaml(
+    tmp_path: Path,
+) -> None:
+    name = 'Front "Door" \\ Camera'
+    settings = runtime_settings.normalize_settings(
+        {**_complete(), "homekit_name": name}
+    )
+
+    environment = runtime_settings.bridge_environment(
+        settings,
+        data_dir=tmp_path,
+        base={},
+    )
+
+    escaped = environment["HOMEKIT_NAME"]
+    assert escaped == 'Front \\"Door\\" \\\\ Camera'
+    assert json.loads(f'"{escaped}"') == name

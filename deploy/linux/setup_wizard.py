@@ -94,6 +94,7 @@ class LoginCoordinator:
         self._dependencies_override = dependencies
         self.discover = discover
         self._pending: tuple[Any, dict[str, str], float] | None = None
+        self._pending_timer: threading.Timer | None = None
         self._lock = threading.RLock()
 
     def _dependencies(
@@ -102,6 +103,10 @@ class LoginCoordinator:
         return self._dependencies_override or _default_client_dependencies()
 
     def _close_pending(self) -> None:
+        timer = self._pending_timer
+        self._pending_timer = None
+        if timer is not None:
+            timer.cancel()
         if self._pending is None:
             return
         client, _, _ = self._pending
@@ -110,6 +115,24 @@ class LoginCoordinator:
             client.close_session()
         except BaseException:  # noqa: S110 - session cleanup is best effort
             pass
+
+    def _expire_pending(self, client: Any, expires_at: float) -> None:
+        with self._lock:
+            if self._pending is None:
+                return
+            pending_client, _, pending_expiry = self._pending
+            if pending_client is client and pending_expiry == expires_at:
+                self._close_pending()
+
+    def _schedule_pending_expiry(self, client: Any, expires_at: float) -> None:
+        timer = threading.Timer(
+            max(0.0, expires_at - time.monotonic()),
+            self._expire_pending,
+            args=(client, expires_at),
+        )
+        timer.daemon = True
+        self._pending_timer = timer
+        timer.start()
 
     def _save_token(self, client: Any, serial: str) -> None:
         token = client.export_token()
@@ -247,11 +270,13 @@ class LoginCoordinator:
             try:
                 client.login()
             except verification_error:
+                expires_at = time.monotonic() + PENDING_LOGIN_SECONDS
                 self._pending = (
                     client,
                     {"mode": mode, "serial": serial},
-                    time.monotonic() + PENDING_LOGIN_SECONDS,
+                    expires_at,
                 )
+                self._schedule_pending_expiry(client, expires_at)
                 return {"state": "sms_required", "message": "请输入短信验证码"}
             except api_error as error:
                 try:
