@@ -28,6 +28,30 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  state-import:
+    profiles: ["tools"]
+    image: "${EZVIZ_HOMEKIT_IMAGE:-ghcr.io/nick3/ezviz-cb2-homekit:latest}"
+    pull_policy: "${EZVIZ_PULL_POLICY:-always}"
+    command: ["import-state"]
+    network_mode: "none"
+    restart: "no"
+    environment:
+      EZVIZ_DATA_DIR: /data
+      EZVIZ_RUNTIME_UID: "${PUID:-1000}"
+      EZVIZ_RUNTIME_GID: "${PGID:-1000}"
+    user: "0:0"
+    volumes:
+      - ezviz-data:/data
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+
   bridge:
     image: "${EZVIZ_HOMEKIT_IMAGE:-ghcr.io/nick3/ezviz-cb2-homekit:latest}"
     pull_policy: "${EZVIZ_PULL_POLICY:-always}"

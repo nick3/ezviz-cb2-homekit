@@ -127,7 +127,7 @@ case "${command}" in
     compose run --rm --no-deps \
       -v "${source_config}:/import/go2rtc.yaml:ro" \
       -v "${source_token}:/import/ezviz_token.json:ro" \
-      bridge import-state
+      state-import import-state
     echo "已导入 HomeKit 配对身份和未绑定会话；启动后请在 Web 向导中重新登录一次萤石。"
     ;;
   help|-h|--help)

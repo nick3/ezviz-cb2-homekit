@@ -140,7 +140,10 @@ homekit:
     assert stat.S_IMODE(unique_backups[0].stat().st_mode) == 0o600
 
 
-def test_import_keeps_homekit_state_but_uses_linux_stream(tmp_path: Path) -> None:
+def test_import_keeps_homekit_state_but_uses_linux_stream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source_config = tmp_path / "mac.yaml"
     source_config.write_text(
         """streams:
@@ -161,6 +164,18 @@ log:
     source_token.chmod(0o600)
     target_config = tmp_path / "data" / "go2rtc.yaml"
     target_token = tmp_path / "data" / "ezviz_token.json"
+    ownership: list[tuple[Path, int, int, bool]] = []
+
+    def record_chown(
+        path: Path,
+        uid: int,
+        gid: int,
+        *,
+        follow_symlinks: bool,
+    ) -> None:
+        ownership.append((path, uid, gid, follow_symlinks))
+
+    monkeypatch.setattr(config_tool.os, "chown", record_chown)
     args = type(
         "Args",
         (),
@@ -170,6 +185,8 @@ log:
             "source_token": source_token,
             "target_config": target_config,
             "target_token": target_token,
+            "uid": 1234,
+            "gid": 5678,
         },
     )()
 
@@ -197,6 +214,12 @@ log:
         "region": "",
     }
     assert stat.S_IMODE(auth_state.stat().st_mode) == 0o600
+    assert ownership == [
+        (target_config, 1234, 5678, False),
+        (target_token, 1234, 5678, False),
+        (auth_state, 1234, 5678, False),
+        (target_config.parent, 1234, 5678, False),
+    ]
 
 
 def test_legacy_bind_migration_preserves_pairing_and_marks_token_unbound(

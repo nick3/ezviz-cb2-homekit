@@ -8,6 +8,7 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 MANAGE = PROJECT_DIR / "deploy" / "linux" / "manage.sh"
 COMPOSE = PROJECT_DIR / "deploy" / "linux" / "compose.yaml"
+ENTRYPOINT = PROJECT_DIR / "deploy" / "linux" / "entrypoint.sh"
 
 
 def _run_login(tmp_path: Path, *, shell_port: str = "") -> str:
@@ -48,3 +49,27 @@ def test_compose_preserves_the_old_bind_mount_for_automatic_migration() -> None:
     assert "- ezviz-data:/data" in compose
     assert "- ./data:/legacy-data:ro" in compose
     assert "- DAC_OVERRIDE" in compose
+
+
+def test_private_state_import_uses_a_restricted_root_helper() -> None:
+    compose = COMPOSE.read_text()
+    importer = compose.split("  state-import:\n", 1)[1].split("\n  bridge:\n", 1)[0]
+    manage = MANAGE.read_text()
+    entrypoint = ENTRYPOINT.read_text()
+
+    assert 'profiles: ["tools"]' in importer
+    assert 'command: ["import-state"]' in importer
+    assert 'network_mode: "none"' in importer
+    assert 'user: "0:0"' in importer
+    assert "- ezviz-data:/data" in importer
+    assert "read_only: true" in importer
+    assert "cap_drop:\n      - ALL" in importer
+    assert "- CHOWN" in importer
+    assert "- DAC_OVERRIDE" in importer
+    assert "- FOWNER" in importer
+    assert "no-new-privileges:true" in importer
+    assert 'EZVIZ_RUNTIME_UID: "${PUID:-1000}"' in importer
+    assert 'EZVIZ_RUNTIME_GID: "${PGID:-1000}"' in importer
+    assert "state-import import-state" in manage
+    assert '--uid "${EZVIZ_RUNTIME_UID:-1000}"' in entrypoint
+    assert '--gid "${EZVIZ_RUNTIME_GID:-1000}"' in entrypoint

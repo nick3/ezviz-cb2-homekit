@@ -80,6 +80,8 @@ def _arguments() -> argparse.Namespace:
     migrate.add_argument("--source-token", type=Path, required=True)
     migrate.add_argument("--target-config", type=Path, required=True)
     migrate.add_argument("--target-token", type=Path, required=True)
+    migrate.add_argument("--uid", type=_numeric_id, required=True)
+    migrate.add_argument("--gid", type=_numeric_id, required=True)
 
     legacy = subparsers.add_parser("migrate-bind-state")
     legacy.add_argument("--source-dir", type=Path, required=True)
@@ -480,6 +482,11 @@ def _import_state(args: argparse.Namespace) -> None:
                 indent=2,
             ).encode("utf-8")
             + b"\n",
+        )
+        _set_migrated_state_owner(
+            args.target_config.parent,
+            (args.target_config, args.target_token, target_auth_state),
+            (args.uid, args.gid),
         )
     except BaseException:
         args.target_config.unlink(missing_ok=True)

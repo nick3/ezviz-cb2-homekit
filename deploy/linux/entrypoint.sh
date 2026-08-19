@@ -73,7 +73,9 @@ case "${command}" in
       --source-config /import/go2rtc.yaml \
       --source-token /import/ezviz_token.json \
       --target-config "${config_file}" \
-      --target-token "${token_file}"
+      --target-token "${token_file}" \
+      --uid "${EZVIZ_RUNTIME_UID:-1000}" \
+      --gid "${EZVIZ_RUNTIME_GID:-1000}"
     ;;
   *)
     exec "$@"
