@@ -68,6 +68,8 @@ def _reset_fake_clients() -> None:
 
 def _application(
     tmp_path: Path,
+    *,
+    client_factory: Callable[..., object] = FakeClient,
 ) -> tuple[setup_wizard.WizardApplication, threading.Event]:
     data = tmp_path / "data"
     store = runtime_settings.SettingsStore(data)
@@ -89,7 +91,7 @@ def _application(
         discover=lambda **_: [
             {"serial": "TESTCB2123456", "ip": "192.168.50.21", "matches_hint": True}
         ],
-        login_dependencies=(FakeClient, VerificationRequired, ApiError),
+        login_dependencies=(client_factory, VerificationRequired, ApiError),
     )
     return application, reloaded
 
@@ -151,7 +153,7 @@ def test_mfa_login_keeps_password_only_in_memory_and_saves_private_token(
 def test_cloud_assisted_identification_expands_suffix_and_returns_lan_ip(
     tmp_path: Path,
 ) -> None:
-    application, _ = _application(tmp_path)
+    application, reloaded = _application(tmp_path)
 
     first = application.run_identify(
         {
@@ -173,9 +175,98 @@ def test_cloud_assisted_identification_expands_suffix_and_returns_lan_ip(
         "source": "cloud_metadata",
         "matches_hint": True,
     }
+    assert application.token_file.exists() is False
+    assert reloaded.is_set() is False
+
+    application.save_settings(
+        {
+            "settings": {
+                **application.settings_store.load(),
+                "region": "api.eu.ezvizlife.com",
+            }
+        }
+    )
+
     assert runtime_settings.token_matches_serial(
         application.token_file, "TESTCB2123456"
     )
+    assert reloaded.is_set()
+
+
+def test_identifying_another_camera_preserves_auth_until_settings_are_saved(
+    tmp_path: Path,
+) -> None:
+    class DifferentCameraClient(FakeClient):
+        def get_device_infos(self, serial: str | None = None) -> dict[str, object]:
+            device = {
+                "deviceInfos": {
+                    "deviceSerial": "OTHERCAM654321",
+                    "deviceType": "CS-CB2",
+                },
+                "WIFI": {},
+                "CONNECTION": {},
+            }
+            return device if serial is not None else {"OTHERCAM654321": device}
+
+        def export_token(self) -> dict[str, object]:
+            return {"session_id": "new-session", "api_url": "https://api.ys7.com"}
+
+    application, reloaded = _application(
+        tmp_path,
+        client_factory=DifferentCameraClient,
+    )
+    auth_state = application.token_file.with_name(runtime_settings.AUTH_STATE_FILE_NAME)
+    runtime_settings.secure_write(
+        application.token_file,
+        b'{"session_id":"old-session"}\n',
+    )
+    runtime_settings.secure_write(
+        auth_state,
+        b'{"serial":"TESTCB2123456"}\n',
+    )
+    old_token = application.token_file.read_bytes()
+    old_binding = auth_state.read_bytes()
+
+    assert (
+        application.run_identify(
+            {
+                "serial_hint": "654321",
+                "account": "owner",
+                "password": "secret",
+            }
+        )["state"]
+        == "sms_required"
+    )
+    identified = application.run_identify({"sms_code": "123456"})
+
+    assert identified["state"] == "identified_no_ip"
+    assert application.token_file.read_bytes() == old_token
+    assert auth_state.read_bytes() == old_binding
+    assert runtime_settings.token_matches_serial(
+        application.token_file, "TESTCB2123456"
+    )
+    assert reloaded.is_set() is False
+
+    settings = application.settings_store.load()
+    application.save_settings(
+        {
+            "settings": {
+                **settings,
+                "serial": "OTHERCAM654321",
+                "camera_ip": "192.168.50.22",
+            }
+        }
+    )
+
+    assert json.loads(application.token_file.read_text()) == {
+        "session_id": "new-session",
+        "api_url": "https://api.ys7.com",
+    }
+    assert json.loads(auth_state.read_text()) == {"serial": "OTHERCAM654321"}
+    assert runtime_settings.token_matches_serial(
+        application.token_file, "OTHERCAM654321"
+    )
+    assert reloaded.is_set()
 
 
 def test_cloud_assisted_identification_rejects_non_official_region(

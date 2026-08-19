@@ -97,6 +97,7 @@ class LoginCoordinator:
         self.discover = discover
         self._pending: tuple[Any, dict[str, str], float] | None = None
         self._pending_timer: threading.Timer | None = None
+        self._staged_token: tuple[bytes, str, str] | None = None
         self._lock = threading.RLock()
 
     def _dependencies(
@@ -136,10 +137,19 @@ class LoginCoordinator:
         self._pending_timer = timer
         timer.start()
 
-    def _save_token(self, client: Any, serial: str) -> None:
+    def _export_token(self, client: Any) -> bytes:
         token = client.export_token()
         if not isinstance(token, dict) or not token.get("session_id"):
             raise WizardError("萤石登录成功，但返回的会话令牌无效")
+        return json.dumps(token, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+
+    def _persist_token(
+        self,
+        token: bytes,
+        serial: str,
+        *,
+        notify: bool = True,
+    ) -> None:
         auth_state = self.token_file.with_name(AUTH_STATE_FILE_NAME)
         secure_write(
             auth_state,
@@ -147,7 +157,7 @@ class LoginCoordinator:
         )
         secure_write(
             self.token_file,
-            json.dumps(token, ensure_ascii=False, indent=2).encode("utf-8") + b"\n",
+            token,
         )
         secure_write(
             auth_state,
@@ -156,7 +166,36 @@ class LoginCoordinator:
             )
             + b"\n",
         )
-        self.reload_callback()
+        if notify:
+            self.reload_callback()
+
+    def _save_token(self, client: Any, serial: str) -> None:
+        self._persist_token(self._export_token(client), serial)
+
+    def _stage_token(self, client: Any, serial: str, region: str) -> None:
+        self._staged_token = (
+            self._export_token(client),
+            serial.strip().upper(),
+            region.strip().lower(),
+        )
+
+    def commit_identification(self, serial: str, region: str) -> bool:
+        """Publish a staged identify token only with its selected settings."""
+
+        with self._lock:
+            staged = self._staged_token
+            if staged is None:
+                return False
+            token, staged_serial, staged_region = staged
+            if (serial.strip().upper(), region.strip().lower()) != (
+                staged_serial,
+                staged_region,
+            ):
+                self._staged_token = None
+                return False
+            self._persist_token(token, staged_serial, notify=False)
+            self._staged_token = None
+            return True
 
     def _finish_configured(self, client: Any, serial: str) -> dict[str, Any]:
         device = client.get_device_infos(serial)
@@ -165,7 +204,12 @@ class LoginCoordinator:
         self._save_token(client, serial)
         return {"state": "authenticated", "message": "萤石账号验证成功"}
 
-    def _finish_identify(self, client: Any, serial_hint: str) -> dict[str, Any]:
+    def _finish_identify(
+        self,
+        client: Any,
+        serial_hint: str,
+        region: str,
+    ) -> dict[str, Any]:
         devices = client.get_device_infos()
         if not isinstance(devices, dict):
             raise WizardError("萤石账号没有返回可识别的摄像头列表")
@@ -221,7 +265,7 @@ class LoginCoordinator:
             if isinstance(device.get("deviceInfos"), dict)
             else {}
         )
-        self._save_token(client, serial)
+        self._stage_token(client, serial, region)
         result: dict[str, Any] = {
             "state": "identified" if camera_ip else "identified_no_ip",
             "message": (
@@ -250,7 +294,7 @@ class LoginCoordinator:
         mode = context.get("mode")
         serial = context.get("serial", "")
         if mode == "identify":
-            return self._finish_identify(client, serial)
+            return self._finish_identify(client, serial, context.get("region", ""))
         return self._finish_configured(client, serial)
 
     def begin(
@@ -267,6 +311,7 @@ class LoginCoordinator:
             raise WizardError("请输入萤石账号和密码")
         with self._lock:
             self._close_pending()
+            self._staged_token = None
             client_factory, verification_error, api_error = self._dependencies()
             client = client_factory(account, password, region)
             try:
@@ -275,7 +320,7 @@ class LoginCoordinator:
                 expires_at = time.monotonic() + PENDING_LOGIN_SECONDS
                 self._pending = (
                     client,
-                    {"mode": mode, "serial": serial},
+                    {"mode": mode, "serial": serial, "region": region},
                     expires_at,
                 )
                 self._schedule_pending_expiry(client, expires_at)
@@ -289,7 +334,10 @@ class LoginCoordinator:
                 client.close_session()
                 raise
             try:
-                return self._complete(client, {"mode": mode, "serial": serial})
+                return self._complete(
+                    client,
+                    {"mode": mode, "serial": serial, "region": region},
+                )
             except api_error as error:
                 raise WizardError(f"萤石设备验证失败：{error}") from error
             finally:
@@ -329,6 +377,7 @@ class LoginCoordinator:
     def close(self) -> None:
         with self._lock:
             self._close_pending()
+            self._staged_token = None
 
 
 class WizardApplication:
@@ -389,6 +438,10 @@ class WizardApplication:
         if not isinstance(settings, dict):
             raise WizardError("缺少配置内容")
         normalized = self.settings_store.save(settings)
+        self.login.commit_identification(
+            str(normalized["serial"]),
+            str(normalized["region"]),
+        )
         self.reload_callback()
         return {"settings": normalized, "message": "配置已保存并正在应用"}
 
