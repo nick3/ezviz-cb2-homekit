@@ -59,6 +59,12 @@ CB2 私网 IP → 反向直连 TCP → 私有帧拆包 → MPEG-TS → go2rtc �
 不含令牌、操作码或媒体内容的阶段诊断。配置中没有云媒体备用源，因此
 直连失败时会明确失败，不会悄悄切回 VTM/VTDU。
 
+首次用新版脚本启动时，会把旧的单流配置自动拆成 `ezviz_raw` 原始流和
+`ezviz` HomeKit 转码流，并完整保留 HomeKit 身份与配对记录。旧文件会以
+权限 `600` 备份为 `go2rtc.yaml.pre-v3.bak`；该文件含私密配对状态，已被
+Git 忽略，也不应通过不安全渠道传输。无法识别的自定义源会让迁移明确失败，
+不会覆盖原配置。
+
 默认使用自适应预热：设备明确报告持续供电时保持局域网流常驻；其余情况按
 纯电池处理，最后一次观看后默认保温 10 分钟（600 秒），并监听 PIR/人体
 告警提前预热。
@@ -88,6 +94,10 @@ EZVIZ_HOMEKIT_TRANSCODE=on_demand ./scripts/start-ezviz-homekit.sh
 ```bash
 EZVIZ_HOMEKIT_TRANSCODE=continuous ./scripts/start-ezviz-homekit.sh
 ```
+
+两个模式使用独立生命周期：10 分钟 linger 只配置在 `ezviz_raw`；最后一个
+HomeKit 观看者离开后，H.264/Opus 转码器立即停止，原始局域网连接才进入
+保温窗口。`continuous` 模式则由本地消费者明确保持转码流常驻。
 
 验证成功后保持该进程运行。若“家庭”App 中已有 `EZVIZ CB2`，直接打开即可；否则选择：
 

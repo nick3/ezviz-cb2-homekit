@@ -35,7 +35,7 @@ POWER_CHANGE_ALERT_CODE = 10036
 PIR_TEXT_HINTS = ("pir", "motion", "person", "human", "人体", "移动", "有人")
 PRELOAD_PROFILES = {
     "on_demand": (
-        "rtsp://127.0.0.1:8554/ezviz?video=h265&audio=aac",
+        "rtsp://127.0.0.1:8554/ezviz_raw?video=h265&audio=aac",
         "原始 H.265/AAC",
     ),
     "continuous": (

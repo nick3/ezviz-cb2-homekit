@@ -28,6 +28,7 @@ if [[ ! -x "$python_bin" ]] \
   || [[ ! -f "$script_dir/probe-ezviz-direct-reverse.py" ]] \
   || [[ ! -f "$script_dir/ezviz_direct_media.py" ]] \
   || [[ ! -f "$script_dir/ezviz_warm_controller.py" ]] \
+  || [[ ! -f "$script_dir/migrate-ezviz-config.py" ]] \
   || [[ ! -f "$script_dir/ezviz_network_lock.py" ]]; then
   echo "缺少 CB2 局域网直连适配器，请先运行 scripts/install-ezviz-cloud-bridge.sh。" >&2
   exit 1
@@ -40,6 +41,12 @@ fi
 
 if [[ ! -s "$go2rtc_config" ]]; then
   echo "缺少本地 go2rtc.yaml 配置。" >&2
+  exit 1
+fi
+
+if ! "$python_bin" "$script_dir/migrate-ezviz-config.py" \
+  --config "$go2rtc_config"; then
+  echo "本地 go2rtc.yaml 无法安全升级；原配置未被覆盖。" >&2
   exit 1
 fi
 

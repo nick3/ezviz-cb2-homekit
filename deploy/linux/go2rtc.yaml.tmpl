@@ -1,5 +1,5 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/AlexxIT/go2rtc/v1.9.14/www/schema.json
-# ezviz-cb2-config-version: 2
+# ezviz-cb2-config-version: 3
 
 # Linux CB2 bridge: EZVIZ API/CAS is control-plane only. The media source is a
 # reverse TCP connection from the exact private address in EZVIZ_CAMERA_IP.
@@ -25,13 +25,14 @@ ffmpeg:
   bin: "/usr/bin/ffmpeg"
 
 linger:
-  ezviz: "${EZVIZ_LINGER:600s}"
+  ezviz_raw: "${EZVIZ_LINGER:600s}"
 
 streams:
-  ezviz:
+  ezviz_raw:
     - "exec:/usr/local/bin/python3 /app/scripts/probe-ezviz-direct-reverse.py --serial=${EZVIZ_SERIAL} --token-file=/data/ezviz_token.json --camera-ip=${EZVIZ_CAMERA_IP} --listen-ip=${EZVIZ_LISTEN_IP} --port=${EZVIZ_CALLBACK_PORT:39000} --stream-type=1 --media-seconds=0 --output-format=mpegts --ffmpeg-bin=/usr/bin/ffmpeg --activity-file=${EZVIZ_ACTIVITY_FILE:/data/ezviz-stream-active.json} --strict-camera-ip --deny-internet-after-connect#killsignal=15#killtimeout=5"
-    - "ffmpeg:ezviz#video=h264${EZVIZ_HARDWARE_FRAGMENT}#raw=-r 15"
-    - "ffmpeg:ezviz#audio=opus"
+  ezviz:
+    - "ffmpeg:ezviz_raw#video=h264${EZVIZ_HARDWARE_FRAGMENT}#raw=-r 15"
+    - "ffmpeg:ezviz_raw#audio=opus"
 
 homekit:
   ezviz:

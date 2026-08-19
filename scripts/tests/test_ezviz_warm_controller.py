@@ -55,10 +55,12 @@ def test_power_auto_requires_live_plugged_in_signals() -> None:
 
 def test_preload_profiles_default_to_raw_or_continuous_homekit_tracks() -> None:
     on_demand_url, on_demand_label = controller.preload_profile("on_demand")
+    assert "/ezviz_raw?" in on_demand_url
     assert "video=h265&audio=aac" in on_demand_url
     assert on_demand_label == "原始 H.265/AAC"
 
     continuous_url, continuous_label = controller.preload_profile("continuous")
+    assert "/ezviz?" in continuous_url
     assert "video=h264&audio=opus" in continuous_url
     assert continuous_label == "HomeKit H.264/Opus"
 

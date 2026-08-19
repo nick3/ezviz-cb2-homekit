@@ -29,7 +29,10 @@ def test_init_creates_private_config_with_random_pin(tmp_path: Path) -> None:
     assert config_tool.PIN_MARKER not in text
     assert config_tool.CONFIG_VERSION_LINE in text
     assert config_tool.PIN_LINE.search(text) is not None
-    assert 'ezviz: "${EZVIZ_LINGER:600s}"' in text
+    assert 'ezviz_raw: "${EZVIZ_LINGER:600s}"' in text
+    assert "streams:\n  ezviz_raw:" in text
+    assert "ffmpeg:ezviz_raw#video=h264" in text
+    assert "ffmpeg:ezviz_raw#audio=opus" in text
     assert "--activity-file=${EZVIZ_ACTIVITY_FILE:/data/ezviz-stream-active.json}" in text
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700
@@ -74,7 +77,9 @@ log:
     assert "321-54-678" in migrated
     assert "client_id=private" in migrated
     assert "old-managed-source" not in migrated
-    assert 'ezviz: "${EZVIZ_LINGER:600s}"' in migrated
+    assert 'ezviz_raw: "${EZVIZ_LINGER:600s}"' in migrated
+    assert "streams:\n  ezviz_raw:" in migrated
+    assert "ffmpeg:ezviz_raw#video=h264" in migrated
     assert (
         "--activity-file=${EZVIZ_ACTIVITY_FILE:/data/ezviz-stream-active.json}"
         in migrated
@@ -128,7 +133,9 @@ log:
     assert "client_id=private" in migrated
     assert "mac-only-source" not in migrated
     assert "/app/scripts/probe-ezviz-direct-reverse.py" in migrated
-    assert 'ezviz: "${EZVIZ_LINGER:600s}"' in migrated
+    assert 'ezviz_raw: "${EZVIZ_LINGER:600s}"' in migrated
+    assert "streams:\n  ezviz_raw:" in migrated
+    assert "ffmpeg:ezviz_raw#audio=opus" in migrated
     assert "--activity-file=${EZVIZ_ACTIVITY_FILE:/data/ezviz-stream-active.json}" in migrated
     assert stat.S_IMODE(target_config.stat().st_mode) == 0o600
     assert stat.S_IMODE(target_token.stat().st_mode) == 0o600

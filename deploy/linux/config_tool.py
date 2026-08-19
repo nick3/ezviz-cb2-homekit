@@ -14,12 +14,14 @@ import sys
 
 
 PIN_MARKER = "__HOMEKIT_PIN__"
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 CONFIG_VERSION_LINE = f"# ezviz-cb2-config-version: {CONFIG_VERSION}"
 CURRENT_CONFIG_MARKERS = (
     CONFIG_VERSION_LINE,
     "linger:",
+    "ezviz_raw:",
     "--activity-file=",
+    "ffmpeg:ezviz_raw#",
 )
 INSECURE_PINS = {
     "00000000",
