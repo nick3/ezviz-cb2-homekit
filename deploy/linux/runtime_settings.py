@@ -108,6 +108,16 @@ def normalize_region(value: Any) -> str:
     return region
 
 
+def _yaml_visible_character(character: str) -> bool:
+    codepoint = ord(character)
+    return (
+        0x20 <= codepoint <= 0x7E
+        or 0xA0 <= codepoint <= 0xD7FF
+        or 0xE000 <= codepoint <= 0xFFFD
+        or 0x10000 <= codepoint <= 0x10FFFF
+    )
+
+
 def normalize_settings(
     value: Mapping[str, Any],
     *,
@@ -174,7 +184,9 @@ def normalize_settings(
     merged["region"] = normalize_region(merged.get("region"))
 
     name = str(merged.get("homekit_name") or "").strip()
-    if not 1 <= len(name) <= 64 or any(ord(char) < 32 for char in name):
+    if not 1 <= len(name) <= 64 or not all(
+        _yaml_visible_character(character) for character in name
+    ):
         raise SettingsError("HomeKit 名称必须是 1 到 64 个可见字符")
     merged["homekit_name"] = name
 

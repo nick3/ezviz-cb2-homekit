@@ -49,6 +49,23 @@ def test_normalize_rejects_non_official_login_endpoint() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["Front Door\x7f", "Front\x85Door", "Front Door\x9f", "Front Door\ud800"],
+)
+def test_normalize_rejects_yaml_forbidden_homekit_name_characters(name: str) -> None:
+    with pytest.raises(runtime_settings.SettingsError, match="HomeKit 名称"):
+        runtime_settings.normalize_settings({**_complete(), "homekit_name": name})
+
+
+def test_normalize_accepts_unicode_homekit_name() -> None:
+    settings = runtime_settings.normalize_settings(
+        {**_complete(), "homekit_name": "门口 📷"}
+    )
+
+    assert settings["homekit_name"] == "门口 📷"
+
+
 def test_store_uses_private_atomic_file_and_reloads(tmp_path: Path) -> None:
     store = runtime_settings.SettingsStore(tmp_path / "data")
     store.prepare()

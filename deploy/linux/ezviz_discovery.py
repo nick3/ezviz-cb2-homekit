@@ -192,8 +192,11 @@ def interface_ipv6_addresses() -> list[str]:
     """Return usable LAN IPv6 addresses, scoped when link-local."""
 
     addresses: set[str] = set()
+    proc_read = False
     try:
-        for line in IPV6_INTERFACES_PATH.read_text(encoding="ascii").splitlines():
+        lines = IPV6_INTERFACES_PATH.read_text(encoding="ascii").splitlines()
+        proc_read = True
+        for line in lines:
             fields = line.split()
             if len(fields) != 6:
                 continue
@@ -211,7 +214,7 @@ def interface_ipv6_addresses() -> list[str]:
     except OSError:
         pass
 
-    if not addresses:
+    if not proc_read:
         try:
             items = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET6)
         except OSError:

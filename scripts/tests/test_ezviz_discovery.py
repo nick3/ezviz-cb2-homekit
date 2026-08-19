@@ -109,3 +109,46 @@ def test_interface_ipv6_addresses_keep_scope_only_for_link_local_urls(
         "fd12::10",
         "fe80::1%eth0",
     ]
+
+
+def test_interface_ipv6_does_not_restore_filtered_proc_addresses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    interfaces = tmp_path / "if_inet6"
+    interfaces.write_text("fd120000000000000000000000000011 02 40 00 01 eth0\n")
+    monkeypatch.setattr(ezviz_discovery, "IPV6_INTERFACES_PATH", interfaces)
+    monkeypatch.setattr(
+        ezviz_discovery.socket,
+        "getaddrinfo",
+        lambda *_args: pytest.fail("hostname fallback must not bypass proc flags"),
+    )
+
+    assert ezviz_discovery.interface_ipv6_addresses() == []
+
+
+def test_interface_ipv6_uses_hostname_fallback_when_proc_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        ezviz_discovery,
+        "IPV6_INTERFACES_PATH",
+        tmp_path / "missing-if_inet6",
+    )
+    monkeypatch.setattr(ezviz_discovery.socket, "gethostname", lambda: "bridge")
+    monkeypatch.setattr(
+        ezviz_discovery.socket,
+        "getaddrinfo",
+        lambda *_args: [
+            (
+                ezviz_discovery.socket.AF_INET6,
+                ezviz_discovery.socket.SOCK_STREAM,
+                6,
+                "",
+                ("fd12::10", 0, 0, 0),
+            )
+        ],
+    )
+
+    assert ezviz_discovery.interface_ipv6_addresses() == ["fd12::10"]
