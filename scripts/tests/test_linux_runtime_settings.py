@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -75,7 +78,7 @@ def test_store_uses_private_atomic_file_and_reloads(tmp_path: Path) -> None:
     assert store.load() == saved
     assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
     assert stat.S_IMODE(store.data_dir.stat().st_mode) == 0o700
-    assert not store.path.with_name(".settings.json.tmp").exists()
+    assert not list(store.path.parent.glob(".settings.json.*.tmp"))
 
 
 def test_load_does_not_chmod_an_already_private_file(
@@ -259,6 +262,64 @@ def test_persist_bound_token_fails_closed_if_the_final_binding_write_fails(
             "api.ys7.com",
         )
         is False
+    )
+
+
+def test_persist_bound_token_waits_for_a_cross_process_transaction_lock(
+    tmp_path: Path,
+) -> None:
+    token = tmp_path / "ezviz_token.json"
+    started = tmp_path / "writer-started"
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(LINUX_DIR),
+        "TOKEN_PATH": str(token),
+        "STARTED_PATH": str(started),
+    }
+    script = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "from runtime_settings import persist_bound_token\n"
+        "Path(os.environ['STARTED_PATH']).write_text('started')\n"
+        "persist_bound_token(Path(os.environ['TOKEN_PATH']), "
+        'b\'{"session_id":"subprocess"}\\n\', '
+        "'TESTCB2123456', 'api.ys7.com')\n"
+    )
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        with runtime_settings._token_transaction_lock(token):
+            process = subprocess.Popen(
+                [sys.executable, "-c", script],
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            deadline = time.monotonic() + 3
+            while not started.exists() and process.poll() is None:
+                if time.monotonic() >= deadline:
+                    raise AssertionError("subprocess did not reach the token write")
+                time.sleep(0.01)
+            assert started.exists()
+            assert process.poll() is None
+            assert token.exists() is False
+
+        stdout, stderr = process.communicate(timeout=3)
+        assert process.returncode == 0, (stdout, stderr)
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=3)
+
+    assert runtime_settings.token_matches_identity(
+        token,
+        "TESTCB2123456",
+        "api.ys7.com",
+    )
+    assert (
+        stat.S_IMODE(
+            token.with_name(runtime_settings.BINDING_LOCK_FILE_NAME).stat().st_mode
+        )
+        == 0o600
     )
 
 

@@ -7,16 +7,19 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import stat
 import sys
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 SETTINGS_VERSION = 1
 SETTINGS_FILE_NAME = "settings.json"
 AUTH_STATE_FILE_NAME = "ezviz_auth.json"
+BINDING_LOCK_FILE_NAME = ".ezviz_binding.lock"
 SERIAL_PATTERN = re.compile(r"^[A-Za-z0-9_-]{7,64}$")
 HOST_PATTERN = re.compile(r"^[A-Za-z0-9.-]{1,253}$")
 TIMEZONE_PATTERN = re.compile(r"^[A-Za-z0-9_+./-]{1,64}$")
@@ -262,10 +265,12 @@ def _yaml_double_quoted_fragment(value: str) -> str:
 def secure_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.parent.chmod(0o700)
-    temporary = path.with_name(f".{path.name}.tmp")
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(
         temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        flags,
         0o600,
     )
     try:
@@ -278,6 +283,27 @@ def secure_write(path: Path, data: bytes) -> None:
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+@contextmanager
+def _token_transaction_lock(path: Path) -> Iterator[None]:
+    import fcntl
+
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    lock_path = path.with_name(BINDING_LOCK_FILE_NAME)
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def persist_bound_token(path: Path, token: bytes, serial: str, region: str) -> None:
@@ -294,21 +320,22 @@ def persist_bound_token(path: Path, token: bytes, serial: str, region: str) -> N
     if not isinstance(value, dict) or not value.get("session_id"):
         raise SettingsError("萤石会话令牌缺少有效 session")
 
-    auth_state = path.with_name(AUTH_STATE_FILE_NAME)
-    secure_write(
-        auth_state,
-        b'{"state":"updating","serial":"","region":""}\n',
-    )
-    secure_write(path, token)
-    secure_write(
-        auth_state,
-        json.dumps(
-            {"serial": normalized_serial, "region": normalized_region},
-            ensure_ascii=False,
-            indent=2,
-        ).encode("utf-8")
-        + b"\n",
-    )
+    with _token_transaction_lock(path):
+        auth_state = path.with_name(AUTH_STATE_FILE_NAME)
+        secure_write(
+            auth_state,
+            b'{"state":"updating","serial":"","region":""}\n',
+        )
+        secure_write(path, token)
+        secure_write(
+            auth_state,
+            json.dumps(
+                {"serial": normalized_serial, "region": normalized_region},
+                ensure_ascii=False,
+                indent=2,
+            ).encode("utf-8")
+            + b"\n",
+        )
 
 
 class SettingsStore:
