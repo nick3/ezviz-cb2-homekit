@@ -52,7 +52,7 @@ RUN apt-get update \
 
 COPY --from=pyezviz-build /wheels/ /wheels/
 RUN python -m pip install --disable-pip-version-check --no-cache-dir \
-      --no-index --find-links=/wheels pyezvizapi \
+      --no-index --find-links=/wheels pyezvizapi defusedxml==0.7.1 \
     && rm -rf /wheels
 
 COPY --from=go2rtc-build /out/go2rtc /usr/local/bin/go2rtc

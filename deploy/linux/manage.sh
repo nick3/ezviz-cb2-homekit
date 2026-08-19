@@ -41,6 +41,24 @@ compose() {
   docker compose --project-directory "${script_dir}" -f compose.yaml "$@"
 }
 
+setup_port() {
+  port=${EZVIZ_SETUP_PORT:-}
+  if [ -z "${port}" ] && [ -f "${script_dir}/.env" ]; then
+    port=$(sed -n \
+      's/^[[:space:]]*EZVIZ_SETUP_PORT[[:space:]]*=[[:space:]]*//p' \
+      "${script_dir}/.env" | tail -n 1 | tr -d '\r')
+    port=$(printf '%s' "${port}" | sed \
+      -e 's/[[:space:]][[:space:]]*#.*$//' \
+      -e 's/^[[:space:]]*//' \
+      -e 's/[[:space:]]*$//')
+    case "${port}" in
+      \"*\") port=${port#\"}; port=${port%\"} ;;
+      \'*\') port=${port#\'}; port=${port%\'} ;;
+    esac
+  fi
+  printf '%s\n' "${port:-8099}"
+}
+
 absolute_file() {
   input=$1
   if [ ! -f "${input}" ]; then
@@ -53,13 +71,13 @@ absolute_file() {
 
 command=${1:-help}
 case "${command}" in
-  init)
+  init|up)
     if [ "$(uname -s)" != "Linux" ]; then
-      echo "正式启动需要 Linux 主机。" >&2
+      echo "正式启动需要 Linux 主机；macOS Docker Desktop 只能用于构建检查。" >&2
       exit 1
     fi
     compose up -d
-    echo "Web 配置向导已启动，请在浏览器访问 http://<Linux-IP>:${EZVIZ_SETUP_PORT:-8099}。"
+    echo "Web 配置向导：http://<Linux-IP>:$(setup_port)"
     ;;
   bundle)
     if [ "$#" -gt 2 ]; then
@@ -76,15 +94,7 @@ case "${command}" in
     compose pull bridge
     ;;
   login)
-    echo "请在浏览器访问 http://<Linux-IP>:${EZVIZ_SETUP_PORT:-8099}，通过向导登录萤石。"
-    ;;
-  up)
-    if [ "$(uname -s)" != "Linux" ]; then
-      echo "正式启动需要 Linux 主机；macOS Docker Desktop 只能用于构建检查。" >&2
-      exit 1
-    fi
-    compose up -d
-    echo "Web 配置向导：http://<Linux-IP>:${EZVIZ_SETUP_PORT:-8099}"
+    echo "请在浏览器访问 http://<Linux-IP>:$(setup_port)，通过向导登录萤石。"
     ;;
   verify)
     compose exec bridge python3 /app/deploy/linux/verify.py
@@ -116,7 +126,7 @@ case "${command}" in
       -v "${source_config}:/import/go2rtc.yaml:ro" \
       -v "${source_token}:/import/ezviz_token.json:ro" \
       bridge import-state
-    echo "已导入 HomeKit 配对身份和萤石会话；请执行 docker compose up -d 后打开 Web 向导。"
+    echo "已导入 HomeKit 配对身份和未绑定会话；启动后请在 Web 向导中重新登录一次萤石。"
     ;;
   help|-h|--help)
     usage

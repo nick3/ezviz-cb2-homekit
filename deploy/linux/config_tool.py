@@ -7,14 +7,14 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import secrets
 import stat
 import sys
-
+from pathlib import Path
 
 PIN_MARKER = "__HOMEKIT_PIN__"
+AUTH_STATE_FILE_NAME = "ezviz_auth.json"
 CONFIG_VERSION = 3
 CONFIG_VERSION_LINE = f"# ezviz-cb2-config-version: {CONFIG_VERSION}"
 CURRENT_CONFIG_MARKERS = (
@@ -39,7 +39,7 @@ INSECURE_PINS = {
     "87654321",
 }
 TOP_LEVEL_SECTION = re.compile(r"(?m)^(?P<name>[A-Za-z0-9_-]+):(?:[ \t].*)?$")
-PIN_LINE = re.compile(r"(?m)^[ \t]{4}pin:[ \t]*[\"']?([0-9-]{8,10})")
+PIN_LINE = re.compile(r"(?m)^[ \t]+pin:[ \t]*[\"']?([0-9-]{8,10})[\"']?[ \t]*(?:#.*)?$")
 
 
 def _arguments() -> argparse.Namespace:
@@ -105,9 +105,7 @@ def _secure_backup(target: Path, data: bytes) -> Path:
         if backup.read_bytes() == data:
             return backup
         digest = hashlib.sha256(data).hexdigest()[:16]
-        backup = target.with_name(
-            f"{target.name}.pre-v{CONFIG_VERSION}.{digest}.bak"
-        )
+        backup = target.with_name(f"{target.name}.pre-v{CONFIG_VERSION}.{digest}.bak")
         if backup.exists():
             backup.chmod(0o600)
             if backup.read_bytes() != data:
@@ -154,21 +152,34 @@ def _validate_token(path: Path) -> bytes:
     return raw
 
 
-def _init(template: Path, target: Path) -> None:
+def _homekit_pin(homekit: str) -> str:
+    match = PIN_LINE.search(homekit)
+    if match is None:
+        raise RuntimeError("HomeKit PIN was not found in the persistent config")
+    return match.group(1)
+
+
+def read_homekit_pin(config: Path) -> str:
+    """Read the PIN only from the top-level HomeKit section."""
+
+    text = config.read_text(encoding="utf-8")
+    return _homekit_pin(_section(text, "homekit"))
+
+
+def init_config(template: Path, target: Path) -> None:
     if target.exists():
         raise RuntimeError(f"Refusing to overwrite existing config: {target}")
     _secure_write(target, _render_new_config(template).encode())
 
 
-def _upgrade(template: Path, target: Path) -> bool:
+def upgrade_config(template: Path, target: Path) -> bool:
     """Upgrade a managed config while preserving its HomeKit identity."""
     source_config = target.read_text(encoding="utf-8")
     if all(marker in source_config for marker in CURRENT_CONFIG_MARKERS):
         return False
 
     homekit = _section(source_config, "homekit")
-    if PIN_LINE.search(homekit) is None:
-        raise RuntimeError("Existing config does not contain a HomeKit PIN")
+    _homekit_pin(homekit)
 
     migrated = _render_new_config(template)
     migrated = _replace_section(migrated, "homekit", homekit)
@@ -178,22 +189,24 @@ def _upgrade(template: Path, target: Path) -> bool:
 
 
 def _show_pin(config: Path) -> None:
-    match = PIN_LINE.search(config.read_text(encoding="utf-8"))
-    if match is None:
-        raise RuntimeError("HomeKit PIN was not found in the persistent config")
-    print(match.group(1))
+    print(read_homekit_pin(config))
 
 
 def _import_state(args: argparse.Namespace) -> None:
-    if args.target_config.exists() or args.target_token.exists():
+    target_auth_state = args.target_token.with_name(AUTH_STATE_FILE_NAME)
+    if (
+        args.target_config.exists()
+        or args.target_token.exists()
+        or target_auth_state.exists()
+    ):
         raise RuntimeError(
-            "Refusing to overwrite existing Linux state; import into an empty data directory"
+            "Refusing to overwrite existing Linux state; "
+            "import into an empty data directory"
         )
 
     source_config = args.source_config.read_text(encoding="utf-8")
     homekit = _section(source_config, "homekit")
-    if PIN_LINE.search(homekit) is None:
-        raise RuntimeError("Source config does not contain a HomeKit PIN")
+    _homekit_pin(homekit)
     token = _validate_token(args.source_token)
 
     target_config = _render_new_config(args.template)
@@ -201,8 +214,19 @@ def _import_state(args: argparse.Namespace) -> None:
     _secure_write(args.target_config, target_config.encode())
     try:
         _secure_write(args.target_token, token)
+        _secure_write(
+            target_auth_state,
+            json.dumps(
+                {"state": "unbound_import", "serial": ""},
+                ensure_ascii=False,
+                indent=2,
+            ).encode("utf-8")
+            + b"\n",
+        )
     except BaseException:
         args.target_config.unlink(missing_ok=True)
+        args.target_token.unlink(missing_ok=True)
+        target_auth_state.unlink(missing_ok=True)
         raise
 
 
@@ -210,9 +234,9 @@ def main() -> int:
     args = _arguments()
     try:
         if args.command == "init":
-            _init(args.template, args.target)
+            init_config(args.template, args.target)
         elif args.command == "upgrade":
-            if _upgrade(args.template, args.target):
+            if upgrade_config(args.template, args.target):
                 print(f"配置已升级到版本 {CONFIG_VERSION}；旧配置已安全备份。")
         elif args.command == "show-pin":
             _show_pin(args.config)

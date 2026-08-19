@@ -6,12 +6,13 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
-from pathlib import Path
 import re
 import stat
+import sys
 import threading
-from typing import Any, Mapping
-
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
 
 SETTINGS_VERSION = 1
 SETTINGS_FILE_NAME = "settings.json"
@@ -85,7 +86,9 @@ def _ipv4(value: Any, label: str, *, optional: bool = False) -> str:
         raise SettingsError(f"{label} 必须是 IPv4 地址")
     if address.is_unspecified or address.is_loopback or address.is_multicast:
         raise SettingsError(f"{label} 必须是可访问的局域网单播地址")
-    if not (address.is_private or address.is_link_local or address in SHARED_ADDRESS_SPACE):
+    if not (
+        address.is_private or address.is_link_local or address in SHARED_ADDRESS_SPACE
+    ):
         raise SettingsError(f"{label} 必须是私有局域网地址")
     return str(address)
 
@@ -129,16 +132,12 @@ def normalize_settings(
         raise SettingsError("请填写或自动发现摄像头 IP")
     else:
         merged["camera_ip"] = ""
-    merged["listen_ip"] = _ipv4(
-        merged.get("listen_ip"), "Linux 主机 IP", optional=True
-    )
+    merged["listen_ip"] = _ipv4(merged.get("listen_ip"), "Linux 主机 IP", optional=True)
 
     merged["callback_port"] = _integer(
         merged.get("callback_port"), "回连端口", 1, 65535
     )
-    merged["warm_seconds"] = _integer(
-        merged.get("warm_seconds"), "保温时长", 60, 86400
-    )
+    merged["warm_seconds"] = _integer(merged.get("warm_seconds"), "保温时长", 60, 86400)
     merged["pir_poll_seconds"] = _integer(
         merged.get("pir_poll_seconds"), "PIR 轮询周期", 5, 300
     )
@@ -201,26 +200,22 @@ def token_is_ready(path: Path) -> bool:
 
 
 def token_matches_serial(path: Path, serial: str) -> bool:
-    """Require new Web logins to match the configured camera.
+    """Return whether a private token is explicitly bound to this camera."""
 
-    Older imported deployments have no auth-state sidecar and remain valid.
-    """
-
-    if not token_is_ready(path):
+    expected_serial = serial.strip().upper()
+    if not expected_serial or not token_is_ready(path):
         return False
     auth_state = path.with_name(AUTH_STATE_FILE_NAME)
-    if not auth_state.exists():
-        return True
     try:
         if stat.S_IMODE(auth_state.stat().st_mode) & 0o077:
             return False
         value = json.loads(auth_state.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
-    return (
-        isinstance(value, dict)
-        and str(value.get("serial") or "").upper() == serial.strip().upper()
-    )
+    if not isinstance(value, dict):
+        return False
+    bound_serial = str(value.get("serial") or "").strip().upper()
+    return bool(bound_serial) and bound_serial == expected_serial
 
 
 def secure_write(path: Path, data: bytes) -> None:
@@ -251,10 +246,27 @@ class SettingsStore:
         self._lock = threading.RLock()
 
     def prepare(self) -> None:
-        self.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.data_dir.chmod(0o700)
+        try:
+            self.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self.data_dir.chmod(0o700)
+        except OSError as error:
+            raise OSError(self._ownership_error("无法创建或收紧目录权限")) from error
         if not os.access(self.data_dir, os.W_OK):
-            raise OSError(f"状态目录不可写：{self.data_dir}")
+            raise OSError(self._ownership_error("目录不可写"))
+
+    def _ownership_error(self, reason: str) -> str:
+        try:
+            metadata = self.data_dir.stat()
+            owner = f"{metadata.st_uid}:{metadata.st_gid}"
+            mode = f"{stat.S_IMODE(metadata.st_mode):03o}"
+        except OSError:
+            owner = "未知"
+            mode = "未知"
+        return (
+            f"状态目录 {self.data_dir} {reason}；目录属主={owner} 权限={mode}，"
+            f"当前进程={os.getuid()}:{os.getgid()}。标准命名卷请保持 "
+            "PUID=1000、PGID=1000；自定义 UID/GID 前必须先为卷设置匹配属主"
+        )
 
     def load(self) -> dict[str, Any]:
         with self._lock:
@@ -266,18 +278,22 @@ class SettingsStore:
                 raise SettingsError("持久化配置文件损坏，无法解析") from error
             if not isinstance(raw, dict):
                 raise SettingsError("持久化配置必须是 JSON 对象")
-            self.path.chmod(0o600)
+            if stat.S_IMODE(self.path.stat().st_mode) != 0o600:
+                self.path.chmod(0o600)
             return normalize_settings(raw, require_complete=False)
 
     def save(self, value: Mapping[str, Any]) -> dict[str, Any]:
         with self._lock:
             normalized = normalize_settings(value, require_complete=True)
-            payload = json.dumps(
-                normalized,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            ).encode("utf-8") + b"\n"
+            payload = (
+                json.dumps(
+                    normalized,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ).encode("utf-8")
+                + b"\n"
+            )
             secure_write(self.path, payload)
             return normalized
 
@@ -297,13 +313,24 @@ class SettingsStore:
                     values[field] = item
             if not values:
                 return False
-            normalized = normalize_settings(values, require_complete=False)
-            payload = json.dumps(
-                normalized,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            ).encode("utf-8") + b"\n"
+            try:
+                normalized = normalize_settings(values, require_complete=False)
+            except SettingsError as error:
+                print(
+                    f"[桥接服务] 忽略无效的旧版环境变量配置：{error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return False
+            payload = (
+                json.dumps(
+                    normalized,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ).encode("utf-8")
+                + b"\n"
+            )
             secure_write(self.path, payload)
             return True
 
@@ -334,9 +361,7 @@ def bridge_environment(
             "EZVIZ_LINGER": f"{normalized['warm_seconds']}s",
             "EZVIZ_PIR_PREHEAT": normalized["pir_preheat"],
             "EZVIZ_PIR_POLL_SECONDS": str(normalized["pir_poll_seconds"]),
-            "EZVIZ_POWER_REFRESH_SECONDS": str(
-                normalized["power_refresh_seconds"]
-            ),
+            "EZVIZ_POWER_REFRESH_SECONDS": str(normalized["power_refresh_seconds"]),
             "EZVIZ_REGION": normalized["region"],
             "HOMEKIT_NAME": normalized["homekit_name"],
             "TZ": normalized["timezone"],

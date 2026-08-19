@@ -3,21 +3,24 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import ipaddress
 import socket
 import struct
 import time
-from typing import Iterable
 import uuid
-import xml.etree.ElementTree as ET
+from collections.abc import Iterable
+from dataclasses import dataclass
+from xml.etree.ElementTree import Element
 
+from defusedxml import ElementTree as DefusedET
+from defusedxml.common import DefusedXmlException
 
 SADP_GROUP = "239.255.255.250"
 SADP_PORT = 37020
 MAX_RESPONSE_BYTES = 65535
 PROBE_TYPES = ("inquiry", "inquiry_v32")
 SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
+SIOCGIFADDR = 0x8915  # Linux ioctl; failures use the hostname fallback below.
 
 
 @dataclass(frozen=True)
@@ -54,14 +57,14 @@ def build_probe(probe_type: str, probe_uuid: str | None = None) -> bytes:
     return (
         '<?xml version="1.0" encoding="utf-8"?>'
         f"<Probe><Uuid>{identifier}</Uuid><Types>{probe_type}</Types></Probe>"
-    ).encode("utf-8")
+    ).encode()
 
 
 def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1].lower()
 
 
-def _fields(root: ET.Element) -> dict[str, str]:
+def _fields(root: Element) -> dict[str, str]:
     result: dict[str, str] = {}
     for element in root.iter():
         if element.text and element.text.strip():
@@ -89,7 +92,9 @@ def _usable_ipv4(value: str) -> str:
         return ""
     if address.is_unspecified or address.is_loopback or address.is_multicast:
         return ""
-    if not (address.is_private or address.is_link_local or address in SHARED_ADDRESS_SPACE):
+    if not (
+        address.is_private or address.is_link_local or address in SHARED_ADDRESS_SPACE
+    ):
         return ""
     return str(address)
 
@@ -98,8 +103,8 @@ def parse_probe_response(payload: bytes, peer_ip: str = "") -> DiscoveredDevice 
     if not payload or len(payload) > MAX_RESPONSE_BYTES:
         return None
     try:
-        root = ET.fromstring(payload)
-    except ET.ParseError:
+        root = DefusedET.fromstring(payload)
+    except (DefusedET.ParseError, DefusedXmlException):
         return None
     fields = _fields(root)
     serial = _first(
@@ -138,7 +143,7 @@ def interface_ipv4_addresses() -> list[str]:
             control = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
                 request = struct.pack("256s", name.encode("utf-8")[:15])
-                response = fcntl.ioctl(control.fileno(), 0x8915, request)
+                response = fcntl.ioctl(control.fileno(), SIOCGIFADDR, request)
                 address = _usable_ipv4(socket.inet_ntoa(response[20:24]))
                 if address:
                     addresses.add(address)

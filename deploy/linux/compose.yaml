@@ -9,6 +9,7 @@ services:
     stop_grace_period: 15s
     environment:
       EZVIZ_DATA_DIR: /data
+      EZVIZ_SETUP_HOST: "${EZVIZ_SETUP_HOST:-0.0.0.0}"
       EZVIZ_SETUP_PORT: "${EZVIZ_SETUP_PORT:-8099}"
       EZVIZ_SERIAL: "${EZVIZ_SERIAL:-}"
       EZVIZ_CAMERA_IP: "${EZVIZ_CAMERA_IP:-}"

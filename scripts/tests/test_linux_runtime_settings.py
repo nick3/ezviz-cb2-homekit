@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import stat
 import sys
+from pathlib import Path
 
 import pytest
-
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 LINUX_DIR = PROJECT_DIR / "deploy" / "linux"
@@ -62,6 +61,20 @@ def test_store_uses_private_atomic_file_and_reloads(tmp_path: Path) -> None:
     assert not store.path.with_name(".settings.json.tmp").exists()
 
 
+def test_load_does_not_chmod_an_already_private_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = runtime_settings.SettingsStore(tmp_path / "data")
+    store.prepare()
+    expected = store.save(_complete())
+
+    def unexpected_chmod(_path: Path, _mode: int) -> None:
+        raise AssertionError("load should not chmod an already-private file")
+
+    monkeypatch.setattr(Path, "chmod", unexpected_chmod)
+    assert store.load() == expected
+
+
 def test_environment_bootstrap_is_one_time_and_never_overwrites_web_settings(
     tmp_path: Path,
 ) -> None:
@@ -80,6 +93,36 @@ def test_environment_bootstrap_is_one_time_and_never_overwrites_web_settings(
     assert store.load()["warm_seconds"] == 1200
 
 
+def test_invalid_environment_bootstrap_warns_and_keeps_wizard_available(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = runtime_settings.SettingsStore(tmp_path / "data")
+    store.prepare()
+
+    assert (
+        store.bootstrap_from_environment(
+            {
+                "EZVIZ_SERIAL": "TESTCB2123456",
+                "EZVIZ_CAMERA_IP": "192.168.50.21",
+                "EZVIZ_WARM_SECONDS": "not-a-number",
+            }
+        )
+        is False
+    )
+    assert not store.path.exists()
+    assert "忽略无效" in capsys.readouterr().err
+
+
+def test_prepare_explains_named_volume_ownership_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = runtime_settings.SettingsStore(tmp_path / "data")
+    monkeypatch.setattr(runtime_settings.os, "access", lambda *_: False)
+
+    with pytest.raises(OSError, match="PUID=1000、PGID=1000"):
+        store.prepare()
+
+
 def test_token_requires_private_permissions_and_session_id(tmp_path: Path) -> None:
     token = tmp_path / "token.json"
     token.write_text(json.dumps({"session_id": "private"}))
@@ -88,6 +131,14 @@ def test_token_requires_private_permissions_and_session_id(tmp_path: Path) -> No
 
     token.chmod(0o600)
     assert runtime_settings.token_is_ready(token) is True
+    assert runtime_settings.token_matches_serial(token, "TESTCB2123456") is False
+
+    runtime_settings.secure_write(
+        token.with_name(runtime_settings.AUTH_STATE_FILE_NAME),
+        b'{"state":"unbound_import","serial":""}\n',
+    )
+    assert runtime_settings.token_matches_serial(token, "") is False
+    assert runtime_settings.token_matches_serial(token, "TESTCB2123456") is False
 
     runtime_settings.secure_write(
         token.with_name(runtime_settings.AUTH_STATE_FILE_NAME),
@@ -112,4 +163,6 @@ def test_bridge_environment_keeps_secrets_out_of_settings(tmp_path: Path) -> Non
     assert environment["EZVIZ_HARDWARE_FRAGMENT"] == "#hardware=vaapi"
     assert environment["EZVIZ_LINGER"] == "900s"
     assert environment["EZVIZ_TOKEN_FILE"] == str(tmp_path / "ezviz_token.json")
-    assert "password" not in " ".join(environment).lower()
+    joined = " ".join(f"{key}={value}" for key, value in environment.items()).lower()
+    assert "password" not in joined
+    assert "secret" not in joined

@@ -3,16 +3,19 @@
 
 from __future__ import annotations
 
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
 import json
-from pathlib import Path
 import secrets
 import threading
 import time
-from typing import Any, Callable, Mapping
+from collections.abc import Callable, Mapping
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
+import config_tool
 from ezviz_discovery import discover_ezviz_devices
 from runtime_settings import (
     AUTH_STATE_FILE_NAME,
@@ -24,13 +27,41 @@ from runtime_settings import (
     usable_lan_ipv4,
 )
 
-
 MAX_REQUEST_BYTES = 64 * 1024
 PENDING_LOGIN_SECONDS = 300
+TRUSTED_IPV4_NETWORKS = tuple(
+    ipaddress.ip_network(value)
+    for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10")
+)
+TRUSTED_IPV6_NETWORK = ipaddress.ip_network("fc00::/7")
 
 
 class WizardError(RuntimeError):
     """A safe error that can be shown in the Web UI."""
+
+
+def _client_allowed(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(value.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    if address.is_loopback or address.is_link_local:
+        return True
+    if isinstance(address, ipaddress.IPv4Address):
+        return any(address in network for network in TRUSTED_IPV4_NETWORKS)
+    return address in TRUSTED_IPV6_NETWORK
+
+
+def _same_origin(origin: str | None, host: str | None) -> bool:
+    if not origin:
+        return True
+    try:
+        parsed = urlsplit(origin)
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and parsed.netloc == host
 
 
 def _default_client_dependencies() -> tuple[
@@ -84,9 +115,9 @@ class LoginCoordinator:
             raise WizardError("萤石登录成功，但返回的会话令牌无效")
         secure_write(
             self.token_file.with_name(AUTH_STATE_FILE_NAME),
-            json.dumps(
-                {"serial": serial.upper()}, ensure_ascii=False, indent=2
-            ).encode("utf-8")
+            json.dumps({"serial": serial.upper()}, ensure_ascii=False, indent=2).encode(
+                "utf-8"
+            )
             + b"\n",
         )
         secure_write(
@@ -297,13 +328,9 @@ class WizardApplication:
 
     def pin(self) -> str:
         try:
-            text = self.config_file.read_text(encoding="utf-8")
-        except OSError:
+            return config_tool.read_homekit_pin(self.config_file)
+        except (OSError, RuntimeError):
             return ""
-        import re
-
-        match = re.search(r"(?m)^[ \t]{4}pin:[ \t]*[\"']?([0-9-]{8,10})", text)
-        return match.group(1) if match else ""
 
     def status(self) -> dict[str, Any]:
         settings = self.settings_store.load()
@@ -371,7 +398,11 @@ class WizardApplication:
         status = self.status()
         bridge = status["bridge"]
         ready = status["configured"] and status["authenticated"]
-        healthy = not ready or bridge.get("state") in {"starting", "running", "restarting"}
+        healthy = not ready or bridge.get("state") in {
+            "starting",
+            "running",
+            "restarting",
+        }
         return healthy, status
 
     def close(self) -> None:
@@ -414,17 +445,13 @@ def _handler(application: WizardApplication) -> type[BaseHTTPRequestHandler]:
             self._send_json({"error": message}, status)
 
         def _same_origin(self) -> bool:
-            origin = self.headers.get("Origin")
-            if not origin:
-                return True
-            try:
-                parsed = urlsplit(origin)
-            except ValueError:
-                return False
-            return parsed.scheme == "http" and parsed.netloc == self.headers.get("Host")
+            return _same_origin(self.headers.get("Origin"), self.headers.get("Host"))
 
         def _read_json(self) -> dict[str, Any]:
-            if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
+            if (
+                self.headers.get("Content-Type", "").split(";", 1)[0]
+                != "application/json"
+            ):
                 raise WizardError("请求必须使用 JSON 格式")
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -441,12 +468,17 @@ def _handler(application: WizardApplication) -> type[BaseHTTPRequestHandler]:
             return value
 
         def do_GET(self) -> None:  # noqa: N802
+            if not _client_allowed(self.client_address[0]):
+                self._send_error("仅允许从可信局域网访问配置向导", HTTPStatus.FORBIDDEN)
+                return
             path = urlsplit(self.path).path
             if path == "/":
                 try:
                     body = application.html()
                 except OSError as error:
-                    self._send_error(f"向导页面无法读取：{error}", HTTPStatus.INTERNAL_SERVER_ERROR)
+                    self._send_error(
+                        f"向导页面无法读取：{error}", HTTPStatus.INTERNAL_SERVER_ERROR
+                    )
                     return
                 self._headers(HTTPStatus.OK, "text/html; charset=utf-8", len(body))
                 self.wfile.write(body)
@@ -470,6 +502,9 @@ def _handler(application: WizardApplication) -> type[BaseHTTPRequestHandler]:
             self._send_error("页面不存在", HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:  # noqa: N802
+            if not _client_allowed(self.client_address[0]):
+                self._send_error("仅允许从可信局域网访问配置向导", HTTPStatus.FORBIDDEN)
+                return
             if not self._same_origin():
                 self._send_error("请求来源不受信任", HTTPStatus.FORBIDDEN)
                 return
@@ -496,9 +531,14 @@ def _handler(application: WizardApplication) -> type[BaseHTTPRequestHandler]:
             except (WizardError, SettingsError) as error:
                 self._send_error(str(error), HTTPStatus.BAD_REQUEST)
             except OSError as error:
-                self._send_error(f"写入配置失败：{error}", HTTPStatus.INTERNAL_SERVER_ERROR)
-            except BaseException as error:
-                print(f"[Web 向导] 未处理错误：{type(error).__name__}: {error}", flush=True)
+                self._send_error(
+                    f"写入配置失败：{error}", HTTPStatus.INTERNAL_SERVER_ERROR
+                )
+            except Exception as error:
+                print(
+                    f"[Web 向导] 未处理错误：{type(error).__name__}: {error}",
+                    flush=True,
+                )
                 self._send_error("服务器处理请求失败", HTTPStatus.INTERNAL_SERVER_ERROR)
 
     return WizardHandler
@@ -523,6 +563,8 @@ def serve(
     host: str = "0.0.0.0",
     port: int = 8099,
 ) -> None:
+    # The handler still enforces a local/private source-address allowlist when
+    # listening on every interface for convenient first-run LAN access.
     server = create_server(application, host, port)
     try:
         server.serve_forever(poll_interval=0.5)

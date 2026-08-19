@@ -81,6 +81,7 @@ fi
   --disable-pip-version-check \
   --no-input \
   --editable "$dependency_dir" \
+  defusedxml==0.7.1 \
   pytest
 "$venv_dir/bin/python" -m pip check
 
@@ -101,7 +102,9 @@ fi
   "$project_dir/scripts/tests/test_linux_runtime_settings.py" \
   "$project_dir/scripts/tests/test_ezviz_discovery.py" \
   "$project_dir/scripts/tests/test_linux_setup_wizard.py" \
-  "$project_dir/scripts/tests/test_linux_service_supervisor.py"
+  "$project_dir/scripts/tests/test_linux_service_supervisor.py" \
+  "$project_dir/scripts/tests/test_linux_healthcheck.py" \
+  "$project_dir/scripts/tests/test_linux_manage.py"
 
 (
   cd "$project_dir"

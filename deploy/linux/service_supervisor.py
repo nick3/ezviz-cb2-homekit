@@ -4,26 +4,36 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import signal
 import subprocess
+import sys
 import threading
 import time
-from typing import Any, Callable, Mapping
+from collections.abc import Callable, Mapping
+from pathlib import Path
+from typing import Any
 
 import config_tool
 from ezviz_discovery import interface_ipv4_addresses
 from runtime_settings import (
+    AUTH_STATE_FILE_NAME,
     SettingsError,
     SettingsStore,
     bridge_environment,
     settings_complete,
+    token_is_ready,
     token_matches_serial,
 )
 from setup_wizard import WizardApplication, create_server
 
-
 RESTART_DELAY_SECONDS = 5.0
+
+
+def _mtime_ns(path: Path) -> int | None:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
 
 
 def bridge_command(
@@ -73,6 +83,8 @@ class BridgeSupervisor:
         project_dir: Path,
         data_dir: Path,
         popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+        startup_error: str = "",
+        startup_recovery: Callable[[], str] | None = None,
     ) -> None:
         self.settings_store = settings_store
         self.token_file = token_file
@@ -80,13 +92,16 @@ class BridgeSupervisor:
         self.project_dir = project_dir
         self.data_dir = data_dir
         self.popen = popen
+        self._startup_error = startup_error
+        self._startup_recovery = startup_recovery
         self.reload_event = threading.Event()
         self.stop_event = threading.Event()
         self._process: subprocess.Popen[bytes] | None = None
-        self._status: dict[str, Any] = {
-            "state": "waiting",
-            "message": "等待完成 Web 配置",
-        }
+        self._status: dict[str, Any] = (
+            {"state": "error", "message": startup_error}
+            if startup_error
+            else {"state": "waiting", "message": "等待完成 Web 配置"}
+        )
         self._status_lock = threading.Lock()
 
     def _set_status(self, state: str, message: str, **extra: Any) -> None:
@@ -105,23 +120,52 @@ class BridgeSupervisor:
         self.stop_event.set()
         self.reload_event.set()
 
-    def _stop_child(self) -> None:
+    def _stop_child(self) -> bool:
         process = self._process
-        self._process = None
-        if process is None or process.poll() is not None:
-            return
+        if process is None:
+            return True
+        if process.poll() is not None:
+            self._process = None
+            return True
         process.terminate()
         try:
             process.wait(timeout=12)
         except subprocess.TimeoutExpired:
             process.kill()
-            process.wait(timeout=3)
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._set_status(
+                    "error",
+                    "桥接子进程停止超时；为避免端口冲突，不会启动新实例",
+                    pid=process.pid,
+                )
+                return False
+        self._process = None
+        return True
+
+    def _retry_startup_initialization(self) -> None:
+        if not self._startup_error or self._startup_recovery is None:
+            return
+        self._startup_error = self._startup_recovery()
+        if self._startup_error:
+            self._set_status("error", self._startup_error)
+        else:
+            self._set_status("waiting", "持久化配置初始化已恢复")
 
     def _ready(self) -> tuple[dict[str, Any], bool, str]:
+        if self._startup_error:
+            return {}, False, self._startup_error
         settings = self.settings_store.load()
         if not settings_complete(settings):
             return settings, False, "等待填写完整摄像头配置"
         if not token_matches_serial(self.token_file, str(settings["serial"])):
+            if token_is_ready(self.token_file):
+                return (
+                    settings,
+                    False,
+                    "萤石会话尚未绑定当前摄像头，请在 Web 向导中重新登录",
+                )
             return settings, False, "等待在 Web 向导中登录萤石"
         return settings, True, "配置已就绪"
 
@@ -141,16 +185,14 @@ class BridgeSupervisor:
 
     def run(self) -> None:
         retry_at = 0.0
-        last_signature: tuple[int | None, int | None] | None = None
+        last_signature: tuple[int | None, ...] | None = None
         try:
             while not self.stop_event.is_set():
                 signature = (
-                    self.settings_store.path.stat().st_mtime_ns
-                    if self.settings_store.path.exists()
-                    else None,
-                    self.token_file.stat().st_mtime_ns
-                    if self.token_file.exists()
-                    else None,
+                    _mtime_ns(self.settings_store.path),
+                    _mtime_ns(self.token_file),
+                    _mtime_ns(self.token_file.with_name(AUTH_STATE_FILE_NAME)),
+                    _mtime_ns(self.config_file),
                 )
                 if last_signature is not None and signature != last_signature:
                     self.reload_event.set()
@@ -160,21 +202,29 @@ class BridgeSupervisor:
                     self.reload_event.clear()
                     if self._process is not None:
                         self._set_status("restarting", "配置发生变化，正在重启桥接服务")
-                        self._stop_child()
+                        if not self._stop_child():
+                            self.reload_event.wait(1)
+                            continue
+                    self._retry_startup_initialization()
                     retry_at = 0.0
 
                 try:
                     settings, ready, message = self._ready()
                 except (OSError, SettingsError) as error:
-                    self._stop_child()
+                    if not self._stop_child():
+                        self.reload_event.wait(1)
+                        continue
                     self._set_status("error", f"读取持久化配置失败：{error}")
                     self.stop_event.wait(2)
                     continue
 
                 if not ready:
-                    self._stop_child()
+                    if not self._stop_child():
+                        self.reload_event.wait(1)
+                        continue
                     if self.status().get("message") != message:
-                        self._set_status("waiting", message)
+                        state = "error" if self._startup_error else "waiting"
+                        self._set_status(state, message)
                     self.reload_event.wait(1)
                     continue
 
@@ -214,10 +264,33 @@ def _positive_port(value: str) -> int:
 
 def _initialize_homekit_config(config_file: Path, template: Path) -> None:
     if not config_file.exists():
-        config_tool._init(template, config_file)
+        config_tool.init_config(template, config_file)
         print("[桥接服务] 已生成新的 HomeKit 身份。", flush=True)
-    config_tool._upgrade(template, config_file)
+    config_tool.upgrade_config(template, config_file)
     config_file.chmod(0o600)
+
+
+def _initialize_persistent_state(
+    settings_store: SettingsStore,
+    config_file: Path,
+    template: Path,
+) -> str:
+    """Initialize recoverable state and return a user-facing startup error."""
+
+    errors: list[str] = []
+    try:
+        if settings_store.bootstrap_from_environment():
+            print("[桥接服务] 已将旧版环境变量迁移到 Web 配置。", flush=True)
+    except (OSError, SettingsError) as error:
+        errors.append(f"旧版环境变量迁移失败：{error}")
+    try:
+        _initialize_homekit_config(config_file, template)
+    except (OSError, RuntimeError) as error:
+        errors.append(f"HomeKit 配置初始化失败：{error}")
+    message = "；".join(errors)
+    if message:
+        print(f"[桥接服务] {message}", file=sys.stderr, flush=True)
+    return message
 
 
 def main() -> int:
@@ -236,10 +309,12 @@ def main() -> int:
     port = _positive_port(os.environ.get("EZVIZ_SETUP_PORT", "8099"))
 
     settings_store = SettingsStore(data_dir)
-    settings_store.prepare()
-    if settings_store.bootstrap_from_environment():
-        print("[桥接服务] 已将旧版环境变量迁移到 Web 配置。", flush=True)
-    _initialize_homekit_config(config_file, template)
+    try:
+        settings_store.prepare()
+    except OSError as error:
+        print(f"[桥接服务] 无法启动：{error}", file=sys.stderr, flush=True)
+        return 1
+    startup_error = _initialize_persistent_state(settings_store, config_file, template)
 
     supervisor = BridgeSupervisor(
         settings_store=settings_store,
@@ -247,6 +322,10 @@ def main() -> int:
         config_file=config_file,
         project_dir=project_dir,
         data_dir=data_dir,
+        startup_error=startup_error,
+        startup_recovery=lambda: _initialize_persistent_state(
+            settings_store, config_file, template
+        ),
     )
     application = WizardApplication(
         settings_store=settings_store,

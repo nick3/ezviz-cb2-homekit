@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 import json
-from http.client import HTTPConnection, HTTPException
 import os
+from http.client import HTTPConnection, HTTPException
 
-
-port = int(os.environ.get("EZVIZ_SETUP_PORT", "8099"))
-connection = HTTPConnection("127.0.0.1", port, timeout=2)
+connection: HTTPConnection | None = None
 try:
+    port = int(os.environ.get("EZVIZ_SETUP_PORT", "8099"))
+    connection = HTTPConnection("127.0.0.1", port, timeout=2)
     connection.request("GET", "/api/health")
     response = connection.getresponse()
     value = json.load(response)
@@ -19,4 +19,5 @@ try:
 except (HTTPException, OSError, ValueError, json.JSONDecodeError):
     raise SystemExit(1) from None
 finally:
-    connection.close()
+    if connection is not None:
+        connection.close()

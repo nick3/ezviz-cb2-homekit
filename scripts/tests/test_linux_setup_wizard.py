@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from http.client import HTTPConnection
 import json
-from pathlib import Path
 import stat
 import sys
 import threading
+from http.client import HTTPConnection
+from pathlib import Path
+from typing import ClassVar
 
 import pytest
-
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 LINUX_DIR = PROJECT_DIR / "deploy" / "linux"
@@ -27,7 +27,7 @@ class ApiError(Exception):
 
 
 class FakeClient:
-    instances: list["FakeClient"] = []
+    instances: ClassVar[list[FakeClient]] = []
 
     def __init__(self, account: str, password: str, region: str) -> None:
         self.account = account
@@ -57,7 +57,14 @@ class FakeClient:
         self.closed = True
 
 
-def _application(tmp_path: Path) -> tuple[setup_wizard.WizardApplication, threading.Event]:
+@pytest.fixture(autouse=True)
+def _reset_fake_clients() -> None:
+    FakeClient.instances.clear()
+
+
+def _application(
+    tmp_path: Path,
+) -> tuple[setup_wizard.WizardApplication, threading.Event]:
     data = tmp_path / "data"
     store = runtime_settings.SettingsStore(data)
     store.prepare()
@@ -94,7 +101,9 @@ def test_mfa_login_keeps_password_only_in_memory_and_saves_private_token(
 
     second = application.run_login({"sms_code": "123456"})
     assert second["state"] == "authenticated"
-    assert runtime_settings.token_matches_serial(application.token_file, "TESTCB2123456")
+    assert runtime_settings.token_matches_serial(
+        application.token_file, "TESTCB2123456"
+    )
     assert stat.S_IMODE(application.token_file.stat().st_mode) == 0o600
     assert "secret" not in application.token_file.read_text()
     assert json.loads(
@@ -184,3 +193,87 @@ def test_http_server_requires_csrf_for_mutations_and_reports_status(
         server.server_close()
         thread.join(timeout=2)
         application.close()
+
+
+@pytest.mark.parametrize(
+    ("address", "allowed"),
+    [
+        ("127.0.0.1", True),
+        ("192.168.50.10", True),
+        ("172.20.0.10", True),
+        ("100.64.1.10", True),
+        ("fd12::10", True),
+        ("8.8.8.8", False),
+        ("2001:4860:4860::8888", False),
+        ("not-an-address", False),
+    ],
+)
+def test_setup_wizard_accepts_only_local_or_private_clients(
+    address: str, allowed: bool
+) -> None:
+    assert setup_wizard._client_allowed(address) is allowed
+
+
+def test_same_origin_accepts_http_and_https_for_the_exact_host() -> None:
+    assert setup_wizard._same_origin(None, "camera.local:8099") is True
+    assert (
+        setup_wizard._same_origin("http://camera.local:8099", "camera.local:8099")
+        is True
+    )
+    assert (
+        setup_wizard._same_origin("https://camera.local:8099", "camera.local:8099")
+        is True
+    )
+    assert (
+        setup_wizard._same_origin("https://attacker.example", "camera.local:8099")
+        is False
+    )
+
+
+def test_http_server_rejects_disallowed_clients_before_read_or_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application, _ = _application(tmp_path)
+    monkeypatch.setattr(setup_wizard, "_client_allowed", lambda _address: False)
+    try:
+        server = setup_wizard.create_server(application, "127.0.0.1", 0)
+    except PermissionError:
+        pytest.skip("the execution sandbox forbids local listener sockets")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+    try:
+        connection.request("GET", "/api/status")
+        denied_read = connection.getresponse()
+        denied_read.read()
+        assert denied_read.status == 403
+
+        connection.request(
+            "POST",
+            "/api/discover",
+            body="{}",
+            headers={
+                "Content-Type": "application/json",
+                "X-CSRF-Token": application.csrf_token,
+            },
+        )
+        denied_write = connection.getresponse()
+        denied_write.read()
+        assert denied_write.status == 403
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        application.close()
+
+
+def test_wizard_markup_uses_step_semantics_and_serial_status_polling() -> None:
+    html = (LINUX_DIR / "wizard.html").read_text()
+
+    assert '<nav class="steps" aria-label="配置步骤">' in html
+    assert html.count('aria-controls="panel-') == 4
+    assert html.count('aria-labelledby="step-') == 4
+    assert 'aria-current="step"' in html
+    assert "setInterval(refreshStatus" not in html
+    assert "window.setTimeout(pollStatus, 3000)" in html

@@ -139,18 +139,18 @@
     </header>
 
     <div class="layout">
-      <aside class="steps" aria-label="配置步骤">
-        <button class="step-link active" data-goto="0"><span class="step-number">1</span><span class="step-label">查找摄像头</span></button>
-        <button class="step-link" data-goto="1"><span class="step-number">2</span><span class="step-label">设置工作策略</span></button>
-        <button class="step-link" data-goto="2"><span class="step-number">3</span><span class="step-label">登录萤石</span></button>
-        <button class="step-link" data-goto="3"><span class="step-number">4</span><span class="step-label">接入家庭</span></button>
+      <nav class="steps" aria-label="配置步骤">
+        <button id="step-0" class="step-link active" data-goto="0" type="button" aria-current="step" aria-controls="panel-0"><span class="step-number">1</span><span class="step-label">查找摄像头</span></button>
+        <button id="step-1" class="step-link" data-goto="1" type="button" aria-controls="panel-1"><span class="step-number">2</span><span class="step-label">设置工作策略</span></button>
+        <button id="step-2" class="step-link" data-goto="2" type="button" aria-controls="panel-2"><span class="step-number">3</span><span class="step-label">登录萤石</span></button>
+        <button id="step-3" class="step-link" data-goto="3" type="button" aria-controls="panel-3"><span class="step-number">4</span><span class="step-label">接入家庭</span></button>
         <div class="trust-note">此页面会接收萤石登录信息，请只在可信家庭局域网中使用，不要映射到公网。</div>
-      </aside>
+      </nav>
 
       <main>
         <div id="globalError" class="error-box" role="alert"></div>
 
-        <section class="panel active" data-panel="0">
+        <section id="panel-0" class="panel active" data-panel="0" aria-labelledby="step-0">
           <h2>先找到你的摄像头</h2>
           <p class="lead">向导会在当前局域网发送只读 SADP 发现请求。它不会尝试登录摄像头，也不会扫描每个 IP 的端口。</p>
 
@@ -192,7 +192,7 @@
           <div class="actions"><div class="right"><button class="button primary" data-next type="button">下一步</button></div></div>
         </section>
 
-        <section class="panel" data-panel="1">
+        <section id="panel-1" class="panel" data-panel="1" aria-labelledby="step-1" hidden>
           <h2>选择日常工作方式</h2>
           <p class="lead">默认策略适合电池与常电两种状态：保持原始流温热，只有打开“家庭”时才进行 HomeKit 转码。</p>
 
@@ -235,7 +235,7 @@
           <div class="actions"><button class="button secondary" data-back type="button">上一步</button><div class="right"><button id="saveButton" class="button primary" type="button">保存并继续</button></div></div>
         </section>
 
-        <section class="panel" data-panel="2">
+        <section id="panel-2" class="panel" data-panel="2" aria-labelledby="step-2" hidden>
           <h2>验证你的萤石账号</h2>
           <p class="lead">云端仅用于鉴权、唤醒和邀请摄像头反向连接。视频建立后仍由摄像头直接传到这台 Linux 服务器。</p>
           <div id="alreadyAuthenticated" class="notice" hidden>已保存可用的萤石会话，可直接进入下一步；重新登录会安全替换旧会话。</div>
@@ -250,7 +250,7 @@
           <div class="actions"><button class="button secondary" data-back type="button">上一步</button><div class="right"><button id="skipLogin" class="button secondary" type="button" hidden>使用现有会话</button><button id="loginButton" class="button primary" type="button">登录并验证设备</button></div></div>
         </section>
 
-        <section class="panel" data-panel="3">
+        <section id="panel-3" class="panel" data-panel="3" aria-labelledby="step-3" hidden>
           <h2>最后，在“家庭”中添加摄像头</h2>
           <p class="lead">桥接服务会在配置完成后自动启动，不需要再次重启容器。</p>
           <div class="success-card">
@@ -310,10 +310,15 @@
     }
     function showStep(index) {
       currentStep = Math.max(0, Math.min(3, index));
-      panels.forEach((panel, i) => panel.classList.toggle('active', i === currentStep));
+      panels.forEach((panel, i) => {
+        panel.classList.toggle('active', i === currentStep);
+        panel.hidden = i !== currentStep;
+      });
       stepLinks.forEach((link, i) => {
         link.classList.toggle('active', i === currentStep);
         link.classList.toggle('done', i < currentStep);
+        if (i === currentStep) link.setAttribute('aria-current', 'step');
+        else link.removeAttribute('aria-current');
       });
       showError();
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -379,6 +384,13 @@
         }
       } catch (error) {
         byId('statusText').textContent = '无法读取服务状态';
+      }
+    }
+    async function pollStatus() {
+      try {
+        if (!document.hidden) await refreshStatus();
+      } finally {
+        window.setTimeout(pollStatus, 3000);
       }
     }
     function renderDevices(devices) {
@@ -540,8 +552,7 @@
     byId('loginButton').addEventListener('click', login);
     byId('smsButton').addEventListener('click', verifySms);
     byId('skipLogin').addEventListener('click', () => showStep(3));
-    refreshStatus();
-    setInterval(refreshStatus, 3000);
+    pollStatus();
   </script>
 </body>
 </html>
