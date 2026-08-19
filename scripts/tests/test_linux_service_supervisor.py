@@ -7,6 +7,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -202,6 +203,67 @@ def test_setup_urls_normalize_bracketed_and_wildcard_hosts(
     expected: tuple[str, ...],
 ) -> None:
     assert service_supervisor._setup_urls(host, 8099, addresses) == expected
+
+
+def test_tls_maintenance_hot_reloads_a_renewed_certificate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waits: list[float] = []
+    reloaded: list[tuple[object, Path, Path]] = []
+    calls: list[tuple[Path, str, list[str]]] = []
+
+    class StopAfterRefresh:
+        def wait(self, timeout: float) -> bool:
+            waits.append(timeout)
+            return len(waits) > 1
+
+        def is_set(self) -> bool:
+            return False
+
+    certificate = tmp_path / "certificate.pem"
+    private_key = tmp_path / "private-key.pem"
+
+    def ensure(
+        data_dir: Path,
+        *,
+        host: str,
+        addresses: list[str],
+    ) -> SimpleNamespace:
+        calls.append((data_dir, host, addresses))
+        return SimpleNamespace(
+            certificate=certificate,
+            private_key=private_key,
+            fingerprint="NEW-FINGERPRINT",
+        )
+
+    server = object()
+    monkeypatch.setattr(
+        service_supervisor,
+        "interface_lan_addresses",
+        lambda: ["192.168.50.10", "fd12::10"],
+    )
+    monkeypatch.setattr(service_supervisor, "ensure_tls_certificate", ensure)
+    monkeypatch.setattr(
+        service_supervisor,
+        "reload_server_certificate",
+        lambda live_server, cert, key: reloaded.append((live_server, cert, key)),
+    )
+
+    service_supervisor._maintain_tls_certificate(
+        stop_event=StopAfterRefresh(),  # type: ignore[arg-type]
+        data_dir=tmp_path,
+        host="::",
+        server=server,
+        initial_fingerprint="OLD-FINGERPRINT",
+    )
+
+    assert waits == [
+        service_supervisor.TLS_REFRESH_SECONDS,
+        service_supervisor.TLS_REFRESH_SECONDS,
+    ]
+    assert calls == [(tmp_path, "::", ["192.168.50.10", "fd12::10"])]
+    assert reloaded == [(server, certificate, private_key)]
 
 
 def test_runtime_signature_ignores_homekit_pairing_config_writes(

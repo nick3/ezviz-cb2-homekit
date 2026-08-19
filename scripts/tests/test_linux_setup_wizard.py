@@ -615,6 +615,30 @@ def test_create_server_binds_with_an_unbracketed_ipv6_host(
     assert bound_addresses == [("fe80::1%eth0", 8099)]
 
 
+def test_reload_server_certificate_updates_the_live_tls_context(tmp_path: Path) -> None:
+    loaded: list[tuple[str, str]] = []
+
+    class Context:
+        def load_cert_chain(self, certificate: str, private_key: str) -> None:
+            loaded.append((certificate, private_key))
+
+    class Socket:
+        context = Context()
+
+    class Server:
+        socket = Socket()
+
+    certificate = tmp_path / "renewed-cert.pem"
+    private_key = tmp_path / "renewed-key.pem"
+    setup_wizard.reload_server_certificate(
+        Server(),  # type: ignore[arg-type]
+        certificate,
+        private_key,
+    )
+
+    assert loaded == [(str(certificate), str(private_key))]
+
+
 @pytest.mark.parametrize("host", ["0.0.0.0", "127.0.0.1", "camera.local"])
 def test_setup_server_keeps_ipv4_address_family(host: str) -> None:
     assert (

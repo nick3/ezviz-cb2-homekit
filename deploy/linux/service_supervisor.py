@@ -6,6 +6,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import signal
+import ssl
 import subprocess
 import sys
 import threading
@@ -30,10 +31,12 @@ from setup_wizard import (
     WizardApplication,
     _server_host,
     create_server,
+    reload_server_certificate,
 )
 from tls_config import TLSConfigError, ensure_tls_certificate
 
 RESTART_DELAY_SECONDS = 5.0
+TLS_REFRESH_SECONDS = 6 * 60 * 60
 
 
 def _mtime_ns(path: Path) -> int | None:
@@ -335,6 +338,50 @@ def _initialize_persistent_state(
     return message
 
 
+def _maintain_tls_certificate(
+    *,
+    stop_event: threading.Event,
+    data_dir: Path,
+    host: str,
+    server: Any,
+    initial_fingerprint: str,
+) -> None:
+    fingerprint = initial_fingerprint
+    while not stop_event.wait(TLS_REFRESH_SECONDS):
+        try:
+            material = ensure_tls_certificate(
+                data_dir,
+                host=host,
+                addresses=interface_lan_addresses(),
+            )
+            if stop_event.is_set():
+                return
+            if material.fingerprint == fingerprint:
+                continue
+            reload_server_certificate(
+                server,
+                material.certificate,
+                material.private_key,
+            )
+            fingerprint = material.fingerprint
+            print(
+                f"[Web 向导] TLS 证书 SHA-256（自动续期）：{fingerprint}",
+                flush=True,
+            )
+        except (
+            OSError,
+            RuntimeError,
+            TLSConfigError,
+            ValueError,
+            ssl.SSLError,
+        ) as error:
+            print(
+                f"[Web 向导] TLS 证书运行期检查失败，将自动重试：{error}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+
 def main() -> int:
     script_dir = Path(__file__).resolve().parent
     project_dir = script_dir.parent.parent
@@ -410,6 +457,18 @@ def main() -> int:
         name="ezviz-setup-web",
         daemon=True,
     )
+    tls_thread = threading.Thread(
+        target=_maintain_tls_certificate,
+        kwargs={
+            "stop_event": supervisor.stop_event,
+            "data_dir": data_dir,
+            "host": host,
+            "server": server,
+            "initial_fingerprint": tls.fingerprint,
+        },
+        name="ezviz-setup-tls",
+        daemon=True,
+    )
 
     def handle_signal(_signum: int, _frame: object) -> None:
         supervisor.request_stop()
@@ -417,6 +476,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
     server_thread.start()
+    tls_thread.start()
     created = "（首次生成）" if tls.created else ""
     print(
         f"[Web 向导] TLS 证书 SHA-256{created}：{tls.fingerprint}",
@@ -432,9 +492,11 @@ def main() -> int:
     try:
         supervisor.run()
     finally:
+        supervisor.request_stop()
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=3)
+        tls_thread.join(timeout=3)
         application.close()
     return 0
 

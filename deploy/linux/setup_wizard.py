@@ -687,6 +687,19 @@ def create_server(
     return server
 
 
+def reload_server_certificate(
+    server: ThreadingHTTPServer,
+    certificate: Path,
+    private_key: Path,
+) -> None:
+    """Reload the certificate used for future HTTPS connections."""
+
+    context = getattr(server.socket, "context", None)
+    if context is None or not hasattr(context, "load_cert_chain"):
+        raise RuntimeError("HTTPS 服务没有可重载的 TLS 上下文")
+    context.load_cert_chain(str(certificate), str(private_key))
+
+
 def serve(
     application: WizardApplication,
     *,
