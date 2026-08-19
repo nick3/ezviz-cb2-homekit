@@ -20,11 +20,10 @@ from urllib.parse import urlsplit
 import config_tool
 from ezviz_discovery import discover_ezviz_devices
 from runtime_settings import (
-    AUTH_STATE_FILE_NAME,
     SettingsError,
     SettingsStore,
     normalize_region,
-    secure_write,
+    persist_bound_token,
     settings_complete,
     token_matches_identity,
     usable_lan_ipv4,
@@ -151,25 +150,7 @@ class LoginCoordinator:
         *,
         notify: bool = True,
     ) -> None:
-        normalized_region = normalize_region(region)
-        auth_state = self.token_file.with_name(AUTH_STATE_FILE_NAME)
-        secure_write(
-            auth_state,
-            b'{"state":"updating","serial":"","region":""}\n',
-        )
-        secure_write(
-            self.token_file,
-            token,
-        )
-        secure_write(
-            auth_state,
-            json.dumps(
-                {"serial": serial.upper(), "region": normalized_region},
-                ensure_ascii=False,
-                indent=2,
-            ).encode("utf-8")
-            + b"\n",
-        )
+        persist_bound_token(self.token_file, token, serial, region)
         if notify:
             self.reload_callback()
 

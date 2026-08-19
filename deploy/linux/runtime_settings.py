@@ -268,6 +268,37 @@ def secure_write(path: Path, data: bytes) -> None:
         raise
 
 
+def persist_bound_token(path: Path, token: bytes, serial: str, region: str) -> None:
+    """Commit a verified token and binding, failing closed on interruption."""
+
+    normalized_serial = serial.strip().upper()
+    if SERIAL_PATTERN.fullmatch(normalized_serial) is None:
+        raise SettingsError("摄像头序列号格式不正确")
+    normalized_region = normalize_region(region)
+    try:
+        value = json.loads(token)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise SettingsError("萤石会话令牌格式不正确") from error
+    if not isinstance(value, dict) or not value.get("session_id"):
+        raise SettingsError("萤石会话令牌缺少有效 session")
+
+    auth_state = path.with_name(AUTH_STATE_FILE_NAME)
+    secure_write(
+        auth_state,
+        b'{"state":"updating","serial":"","region":""}\n',
+    )
+    secure_write(path, token)
+    secure_write(
+        auth_state,
+        json.dumps(
+            {"serial": normalized_serial, "region": normalized_region},
+            ensure_ascii=False,
+            indent=2,
+        ).encode("utf-8")
+        + b"\n",
+    )
+
+
 class SettingsStore:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir

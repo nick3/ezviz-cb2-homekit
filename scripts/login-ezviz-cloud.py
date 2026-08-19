@@ -6,16 +6,18 @@ import argparse
 import getpass
 import json
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 
 from pyezvizapi import EzvizClient
 from pyezvizapi.exceptions import EzvizAuthVerificationCode, PyEzvizError
 
-
 REGION = "api.ys7.com"
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 TOKEN_FILE = PROJECT_DIR / ".tmp" / "ezviz_token.json"
+sys.path.insert(0, str(PROJECT_DIR / "deploy" / "linux"))
+
+from runtime_settings import SettingsError, persist_bound_token  # noqa: E402
 
 
 def arguments() -> argparse.Namespace:
@@ -52,19 +54,14 @@ def prompt_nonempty(label: str, *, secret: bool = False) -> str:
         print("输入不能为空。", file=sys.stderr)
 
 
-def save_token(token: dict[str, object], token_file: Path) -> None:
-    token_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temporary = token_file.with_suffix(".tmp")
-    descriptor = os.open(
-        temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-        0o600,
-    )
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        json.dump(token, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
-    os.replace(temporary, token_file)
-    token_file.chmod(0o600)
+def save_token(
+    token: dict[str, object],
+    token_file: Path,
+    serial: str,
+    region: str,
+) -> None:
+    encoded = json.dumps(token, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+    persist_bound_token(token_file, encoded, serial, region)
 
 
 def main() -> int:
@@ -93,10 +90,10 @@ def main() -> int:
             )
             return 1
 
-        save_token(client.export_token(), args.token_file)
+        save_token(client.export_token(), args.token_file, args.serial, args.region)
         print(f"登录成功，已确认账号中的目标摄像头（{args.serial}）。")
         return 0
-    except PyEzvizError as error:
+    except (PyEzvizError, SettingsError) as error:
         print(f"登录或设备检查失败：{error}", file=sys.stderr)
         return 1
     finally:

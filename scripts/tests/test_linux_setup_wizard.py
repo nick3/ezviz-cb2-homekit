@@ -328,14 +328,14 @@ def test_failed_token_replacement_leaves_the_binding_invalidated(
         application.token_file.with_name(runtime_settings.AUTH_STATE_FILE_NAME),
         b'{"serial":"TESTCB2123456","region":"api.ys7.com"}\n',
     )
-    real_secure_write = setup_wizard.secure_write
+    real_secure_write = runtime_settings.secure_write
 
     def fail_token_write(path: Path, data: bytes) -> None:
         if path == application.token_file:
             raise OSError("simulated token write failure")
         real_secure_write(path, data)
 
-    monkeypatch.setattr(setup_wizard, "secure_write", fail_token_write)
+    monkeypatch.setattr(runtime_settings, "secure_write", fail_token_write)
     assert (
         application.run_login({"account": "owner", "password": "secret"})["state"]
         == "sms_required"

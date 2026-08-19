@@ -184,6 +184,67 @@ def test_token_requires_private_permissions_and_session_id(tmp_path: Path) -> No
     )
 
 
+def test_persist_bound_token_commits_the_verified_identity(tmp_path: Path) -> None:
+    token = tmp_path / "ezviz_token.json"
+
+    runtime_settings.persist_bound_token(
+        token,
+        b'{"session_id":"private"}\n',
+        "testcb2123456",
+        "API.EU.EZVIZLIFE.COM",
+    )
+
+    assert runtime_settings.token_matches_identity(
+        token,
+        "TESTCB2123456",
+        "api.eu.ezvizlife.com",
+    )
+    assert stat.S_IMODE(token.stat().st_mode) == 0o600
+    assert (
+        stat.S_IMODE(
+            token.with_name(runtime_settings.AUTH_STATE_FILE_NAME).stat().st_mode
+        )
+        == 0o600
+    )
+
+
+def test_persist_bound_token_fails_closed_if_the_final_binding_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = tmp_path / "ezviz_token.json"
+    real_secure_write = runtime_settings.secure_write
+    writes = 0
+
+    def fail_final_write(path: Path, data: bytes) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 3:
+            raise OSError("auth commit failed")
+        real_secure_write(path, data)
+
+    monkeypatch.setattr(runtime_settings, "secure_write", fail_final_write)
+    with pytest.raises(OSError, match="auth commit failed"):
+        runtime_settings.persist_bound_token(
+            token,
+            b'{"session_id":"replacement"}\n',
+            "TESTCB2123456",
+            "api.ys7.com",
+        )
+
+    assert json.loads(
+        token.with_name(runtime_settings.AUTH_STATE_FILE_NAME).read_text()
+    ) == {"state": "updating", "serial": "", "region": ""}
+    assert (
+        runtime_settings.token_matches_identity(
+            token,
+            "TESTCB2123456",
+            "api.ys7.com",
+        )
+        is False
+    )
+
+
 def test_bridge_environment_keeps_secrets_out_of_settings(tmp_path: Path) -> None:
     settings = runtime_settings.normalize_settings(
         {**_complete(), "encoder": "vaapi", "warm_seconds": 900}
