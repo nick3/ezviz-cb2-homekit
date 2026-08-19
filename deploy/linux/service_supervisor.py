@@ -56,21 +56,30 @@ def _runtime_signature(settings_path: Path, token_file: Path) -> tuple[int | Non
     )
 
 
+def _listener_addresses(host: str, addresses: Iterable[str]) -> tuple[str, ...]:
+    normalized_host = _server_host(host)
+    if normalized_host not in {DEFAULT_SETUP_HOST, "::"}:
+        return ()
+    expected_version = 4 if normalized_host == DEFAULT_SETUP_HOST else 6
+    targets = []
+    for target in addresses:
+        value = _server_host(target).split("%", 1)[0]
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            continue
+        if address.version == expected_version:
+            targets.append(target)
+    return tuple(targets)
+
+
 def _setup_urls(host: str, port: int, addresses: Iterable[str]) -> tuple[str, ...]:
     normalized_host = _server_host(host)
-    if normalized_host in {DEFAULT_SETUP_HOST, "::"}:
-        expected_version = 4 if normalized_host == DEFAULT_SETUP_HOST else 6
-        targets = []
-        for target in addresses:
-            value = _server_host(target).split("%", 1)[0]
-            try:
-                address = ipaddress.ip_address(value)
-            except ValueError:
-                continue
-            if address.version == expected_version:
-                targets.append(target)
-    else:
-        targets = [host]
+    targets = (
+        _listener_addresses(host, addresses)
+        if normalized_host in {DEFAULT_SETUP_HOST, "::"}
+        else (host,)
+    )
     urls = []
     for target in targets:
         address = _server_host(target)
@@ -352,7 +361,7 @@ def _maintain_tls_certificate(
             material = ensure_tls_certificate(
                 data_dir,
                 host=host,
-                addresses=interface_lan_addresses(),
+                addresses=_listener_addresses(host, interface_lan_addresses()),
             )
             if stop_event.is_set():
                 return
@@ -405,7 +414,7 @@ def main() -> int:
         print(f"[桥接服务] 无法启动：{error}", file=sys.stderr, flush=True)
         return 1
     startup_error = _initialize_persistent_state(settings_store, config_file, template)
-    addresses = interface_lan_addresses()
+    addresses = _listener_addresses(host, interface_lan_addresses())
     try:
         tls = ensure_tls_certificate(data_dir, host=host, addresses=addresses)
     except (OSError, TLSConfigError) as error:

@@ -205,13 +205,39 @@ def test_setup_urls_normalize_bracketed_and_wildcard_hosts(
     assert service_supervisor._setup_urls(host, 8099, addresses) == expected
 
 
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("0.0.0.0", ("192.168.50.10",)),
+        ("[0.0.0.0]", ("192.168.50.10",)),
+        ("::", ("fd12::10", "fe80::1%eth0")),
+        ("[::]", ("fd12::10", "fe80::1%eth0")),
+        ("192.168.50.20", ()),
+        ("fd12::20", ()),
+        ("camera.local", ()),
+    ],
+)
+def test_listener_addresses_include_only_reachable_wildcard_identities(
+    host: str,
+    expected: tuple[str, ...],
+) -> None:
+    addresses = [
+        "192.168.50.10",
+        "fd12::10",
+        "fe80::1%eth0",
+        "not-an-address",
+    ]
+
+    assert service_supervisor._listener_addresses(host, addresses) == expected
+
+
 def test_tls_maintenance_hot_reloads_a_renewed_certificate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     waits: list[float] = []
     reloaded: list[tuple[object, Path, Path]] = []
-    calls: list[tuple[Path, str, list[str]]] = []
+    calls: list[tuple[Path, str, tuple[str, ...]]] = []
 
     class StopAfterRefresh:
         def wait(self, timeout: float) -> bool:
@@ -228,7 +254,7 @@ def test_tls_maintenance_hot_reloads_a_renewed_certificate(
         data_dir: Path,
         *,
         host: str,
-        addresses: list[str],
+        addresses: tuple[str, ...],
     ) -> SimpleNamespace:
         calls.append((data_dir, host, addresses))
         return SimpleNamespace(
@@ -262,7 +288,7 @@ def test_tls_maintenance_hot_reloads_a_renewed_certificate(
         service_supervisor.TLS_REFRESH_SECONDS,
         service_supervisor.TLS_REFRESH_SECONDS,
     ]
-    assert calls == [(tmp_path, "::", ["192.168.50.10", "fd12::10"])]
+    assert calls == [(tmp_path, "::", ("fd12::10",))]
     assert reloaded == [(server, certificate, private_key)]
 
 
