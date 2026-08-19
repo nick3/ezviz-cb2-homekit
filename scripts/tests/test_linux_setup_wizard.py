@@ -585,10 +585,6 @@ def test_create_server_binds_with_an_unbracketed_ipv6_host(
         def load_cert_chain(self, _certificate: str, _private_key: str) -> None:
             pass
 
-        def wrap_socket(self, sock: object, *, server_side: bool) -> object:
-            assert server_side is True
-            return sock
-
     def server_factory(
         address: tuple[str, int],
         _handler: object,
@@ -615,28 +611,72 @@ def test_create_server_binds_with_an_unbracketed_ipv6_host(
     assert bound_addresses == [("fe80::1%eth0", 8099)]
 
 
-def test_reload_server_certificate_updates_the_live_tls_context(tmp_path: Path) -> None:
-    loaded: list[tuple[str, str]] = []
-
-    class Context:
-        def load_cert_chain(self, certificate: str, private_key: str) -> None:
-            loaded.append((certificate, private_key))
-
-    class Socket:
-        context = Context()
-
+def test_reload_server_certificate_swaps_the_live_tls_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class Server:
-        socket = Socket()
+        tls_context = object()
 
     certificate = tmp_path / "renewed-cert.pem"
     private_key = tmp_path / "renewed-key.pem"
+    renewed_context = object()
+    monkeypatch.setattr(
+        setup_wizard,
+        "_tls_server_context",
+        lambda cert, key: renewed_context,
+    )
+    server = Server()
     setup_wizard.reload_server_certificate(
-        Server(),  # type: ignore[arg-type]
+        server,  # type: ignore[arg-type]
         certificate,
         private_key,
     )
 
-    assert loaded == [(str(certificate), str(private_key))]
+    assert server.tls_context is renewed_context
+
+
+def test_tls_handshake_runs_in_a_bounded_worker_thread() -> None:
+    handshake_started = threading.Event()
+    release_handshake = threading.Event()
+    request_finished = threading.Event()
+
+    class Socket:
+        def __init__(self) -> None:
+            self.timeouts: list[float | None] = []
+
+        def settimeout(self, value: float | None) -> None:
+            self.timeouts.append(value)
+
+    class Context:
+        def wrap_socket(self, request: Socket, *, server_side: bool) -> Socket:
+            assert server_side is True
+            handshake_started.set()
+            assert release_handshake.wait(1)
+            return request
+
+    class Server(setup_wizard.ReusableThreadingHTTPServer):
+        block_on_close = False
+
+        def __init__(self) -> None:
+            self.tls_context = Context()  # type: ignore[assignment]
+
+        def finish_request(self, request: Socket, client_address: object) -> None:
+            request_finished.set()
+
+        def shutdown_request(self, request: Socket) -> None:
+            pass
+
+    request = Socket()
+    server = Server()
+    server.process_request(request, ("192.168.50.20", 12345))  # type: ignore[arg-type]
+
+    assert handshake_started.wait(1)
+    assert request_finished.is_set() is False
+    assert request.timeouts == [setup_wizard.TLS_HANDSHAKE_TIMEOUT_SECONDS]
+    release_handshake.set()
+    assert request_finished.wait(1)
+    assert request.timeouts == [setup_wizard.TLS_HANDSHAKE_TIMEOUT_SECONDS, None]
 
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "127.0.0.1", "camera.local"])

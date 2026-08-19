@@ -31,6 +31,7 @@ from runtime_settings import (
 
 MAX_REQUEST_BYTES = 64 * 1024
 PENDING_LOGIN_SECONDS = 300
+TLS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 DEFAULT_SETUP_HOST = "0.0.0.0"  # noqa: S104 - HTTPS plus a LAN allowlist is intentional.
 TRUSTED_IPV4_NETWORKS = tuple(
     ipaddress.ip_network(value)
@@ -642,6 +643,25 @@ def _handler(application: WizardApplication) -> type[BaseHTTPRequestHandler]:
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
+    tls_context: ssl.SSLContext | None = None
+
+    def process_request_thread(
+        self,
+        request: socket.socket,
+        client_address: Any,
+    ) -> None:
+        tls_request: socket.socket | None = None
+        try:
+            context = self.tls_context
+            if context is None:
+                raise RuntimeError("HTTPS 服务尚未配置 TLS 上下文")
+            request.settimeout(TLS_HANDSHAKE_TIMEOUT_SECONDS)
+            tls_request = context.wrap_socket(request, server_side=True)
+            tls_request.settimeout(None)
+        except (OSError, RuntimeError):
+            self.shutdown_request(tls_request or request)
+            return
+        super().process_request_thread(tls_request, client_address)
 
 
 class ReusableThreadingHTTPServerIPv6(ReusableThreadingHTTPServer):
@@ -666,6 +686,13 @@ def _server_class(host: str) -> type[ReusableThreadingHTTPServer]:
     return ReusableThreadingHTTPServer
 
 
+def _tls_server_context(certificate: Path, private_key: Path) -> ssl.SSLContext:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(str(certificate), str(private_key))
+    return context
+
+
 def create_server(
     application: WizardApplication,
     host: str,
@@ -677,10 +704,7 @@ def create_server(
     bind_host = _server_host(host)
     server = _server_class(bind_host)((bind_host, port), _handler(application))
     try:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-        context.load_cert_chain(str(certificate), str(private_key))
-        server.socket = context.wrap_socket(server.socket, server_side=True)
+        server.tls_context = _tls_server_context(certificate, private_key)
     except BaseException:
         server.server_close()
         raise
@@ -694,10 +718,9 @@ def reload_server_certificate(
 ) -> None:
     """Reload the certificate used for future HTTPS connections."""
 
-    context = getattr(server.socket, "context", None)
-    if context is None or not hasattr(context, "load_cert_chain"):
+    if not hasattr(server, "tls_context"):
         raise RuntimeError("HTTPS 服务没有可重载的 TLS 上下文")
-    context.load_cert_chain(str(certificate), str(private_key))
+    server.tls_context = _tls_server_context(certificate, private_key)  # type: ignore[attr-defined]
 
 
 def serve(
