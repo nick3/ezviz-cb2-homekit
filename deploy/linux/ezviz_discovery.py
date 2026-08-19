@@ -23,6 +23,8 @@ PROBE_TYPES = ("inquiry", "inquiry_v32")
 SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
 SIOCGIFADDR = 0x8915  # Linux ioctl; failures use the hostname fallback below.
 IPV6_INTERFACES_PATH = Path("/proc/net/if_inet6")
+# Linux IFA_F_TEMPORARY, OPTIMISTIC, DADFAILED, DEPRECATED, and TENTATIVE.
+UNSTABLE_IPV6_FLAGS = 0x01 | 0x04 | 0x08 | 0x20 | 0x40
 
 
 @dataclass(frozen=True)
@@ -195,10 +197,13 @@ def interface_ipv6_addresses() -> list[str]:
             fields = line.split()
             if len(fields) != 6:
                 continue
-            packed, _, _, _, _, interface = fields
+            packed, _, _, _, flags_text, interface = fields
             try:
+                flags = int(flags_text, 16)
                 value = socket.inet_ntop(socket.AF_INET6, bytes.fromhex(packed))
             except (OSError, ValueError):
+                continue
+            if flags & UNSTABLE_IPV6_FLAGS:
                 continue
             address = _usable_ipv6(value, interface)
             if address:
