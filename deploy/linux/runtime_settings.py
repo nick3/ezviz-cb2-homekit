@@ -100,6 +100,14 @@ def usable_lan_ipv4(value: Any) -> str:
         return ""
 
 
+def normalize_region(value: Any) -> str:
+    region = str(value or "").strip().lower()
+    official_region = region == "api.ys7.com" or region.endswith(".ezvizlife.com")
+    if HOST_PATTERN.fullmatch(region) is None or ".." in region or not official_region:
+        raise SettingsError("萤石 API 区域必须使用官方 ys7.com 或 ezvizlife.com 地址")
+    return region
+
+
 def normalize_settings(
     value: Mapping[str, Any],
     *,
@@ -163,11 +171,7 @@ def normalize_settings(
             raise SettingsError(f"{labels[field]}的取值不受支持")
         merged[field] = selected
 
-    region = str(merged.get("region") or "").strip().lower()
-    official_region = region == "api.ys7.com" or region.endswith(".ezvizlife.com")
-    if HOST_PATTERN.fullmatch(region) is None or ".." in region or not official_region:
-        raise SettingsError("萤石 API 区域必须使用官方 ys7.com 或 ezvizlife.com 地址")
-    merged["region"] = region
+    merged["region"] = normalize_region(merged.get("region"))
 
     name = str(merged.get("homekit_name") or "").strip()
     if not 1 <= len(name) <= 64 or any(ord(char) < 32 for char in name):

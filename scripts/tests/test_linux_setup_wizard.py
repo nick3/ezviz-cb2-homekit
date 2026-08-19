@@ -154,9 +154,15 @@ def test_cloud_assisted_identification_expands_suffix_and_returns_lan_ip(
     application, _ = _application(tmp_path)
 
     first = application.run_identify(
-        {"serial_hint": "123456", "account": "owner", "password": "secret"}
+        {
+            "serial_hint": "123456",
+            "account": "owner",
+            "password": "secret",
+            "region": "API.EU.EZVIZLIFE.COM",
+        }
     )
     assert first["state"] == "sms_required"
+    assert FakeClient.instances[-1].region == "api.eu.ezvizlife.com"
 
     identified = application.run_identify({"sms_code": "123456"})
     assert identified["state"] == "identified"
@@ -170,6 +176,24 @@ def test_cloud_assisted_identification_expands_suffix_and_returns_lan_ip(
     assert runtime_settings.token_matches_serial(
         application.token_file, "TESTCB2123456"
     )
+
+
+def test_cloud_assisted_identification_rejects_non_official_region(
+    tmp_path: Path,
+) -> None:
+    application, _ = _application(tmp_path)
+
+    with pytest.raises(runtime_settings.SettingsError, match="官方"):
+        application.run_identify(
+            {
+                "serial_hint": "123456",
+                "account": "owner",
+                "password": "secret",
+                "region": "login.attacker.example",
+            }
+        )
+
+    assert FakeClient.instances == []
 
 
 def test_failed_token_replacement_leaves_the_binding_invalidated(
@@ -462,3 +486,9 @@ def test_wizard_markup_uses_step_semantics_and_serial_status_polling() -> None:
     assert "setInterval(refreshStatus" not in html
     assert "catch (error)" in html
     assert "window.setTimeout(pollStatus, 3000)" in html
+    assert (
+        html.index('id="panel-0"')
+        < html.index('id="region"')
+        < html.index('id="identifyButton"')
+    )
+    assert "region: byId('region').value.trim()" in html

@@ -172,6 +172,7 @@
             <h3>电池摄像头正在休眠？</h3>
             <p>输入序列号末 4 位以上并临时登录萤石。向导会从账号设备元数据中取得完整序列号和最近的局域网 IP；如元数据没有 IP，还会尝试唤醒后再次执行 SADP 搜索。</p>
             <div class="grid">
+              <div class="field full"><label for="region">萤石 API 区域</label><input id="region" value="api.ys7.com"><span class="hint">中国区通常保持默认；区域账号请填写官方 *.ezvizlife.com 地址。</span></div>
               <div class="field"><label for="findAccount">萤石账号</label><input id="findAccount" autocomplete="username" placeholder="手机号或登录名"></div>
               <div class="field"><label for="findPassword">萤石账号密码</label><input id="findPassword" type="password" autocomplete="current-password"></div>
             </div>
@@ -228,7 +229,6 @@
               <div class="field"><label for="timezone">时区</label><input id="timezone" value="Asia/Shanghai"></div>
               <div class="field"><label for="pirPoll">PIR 备用轮询周期（秒）</label><input id="pirPoll" type="number" min="5" max="300" value="15"></div>
               <div class="field"><label for="powerRefresh">供电状态刷新周期（秒）</label><input id="powerRefresh" type="number" min="30" value="300"></div>
-              <div class="field full"><label for="region">萤石 API 区域</label><input id="region" value="api.ys7.com"></div>
             </div>
           </details>
 
@@ -472,7 +472,12 @@
       button.disabled = true;
       button.textContent = '正在登录并识别…';
       try {
-        const value = await api('/api/identify', { serial_hint: hint, account: byId('findAccount').value, password: byId('findPassword').value });
+        const value = await api('/api/identify', {
+          serial_hint: hint,
+          account: byId('findAccount').value,
+          password: byId('findPassword').value,
+          region: byId('region').value.trim()
+        });
         byId('findPassword').value = '';
         if (value.state === 'sms_required') {
           byId('findSmsArea').hidden = false;

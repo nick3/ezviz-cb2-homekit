@@ -23,6 +23,7 @@ from runtime_settings import (
     AUTH_STATE_FILE_NAME,
     SettingsError,
     SettingsStore,
+    normalize_region,
     secure_write,
     settings_complete,
     token_matches_serial,
@@ -425,11 +426,15 @@ class WizardApplication:
         sms_code = str(payload.get("sms_code") or "")
         if sms_code:
             return self.login.finish_sms(sms_code, expected_mode="identify")
+        requested_region = payload.get("region")
+        region = normalize_region(
+            settings["region"] if requested_region is None else requested_region
+        )
         return self.login.begin(
             account=str(payload.get("account") or ""),
             password=str(payload.get("password") or ""),
             serial=str(payload.get("serial_hint") or ""),
-            region=str(settings["region"]),
+            region=region,
             mode="identify",
         )
 
