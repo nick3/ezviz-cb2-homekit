@@ -73,7 +73,8 @@ def _ready_supervisor(
     runtime_settings.secure_write(token, b'{"session_id":"private"}\n')
     runtime_settings.secure_write(
         token.with_name(runtime_settings.AUTH_STATE_FILE_NAME),
-        json.dumps({"serial": "TESTCB2123456"}).encode() + b"\n",
+        json.dumps({"serial": "TESTCB2123456", "region": "api.ys7.com"}).encode()
+        + b"\n",
     )
     options: dict[str, object] = {}
     if popen is not None:
@@ -146,11 +147,22 @@ def test_supervisor_waits_until_both_settings_and_token_are_ready(
 
     runtime_settings.secure_write(
         supervisor.token_file.with_name(runtime_settings.AUTH_STATE_FILE_NAME),
-        b'{"serial":"TESTCB2123456"}\n',
+        b'{"serial":"TESTCB2123456","region":"api.ys7.com"}\n',
     )
     _, ready, message = supervisor._ready()
     assert ready is True
     assert message == "配置已就绪"
+
+    store.save(
+        {
+            "serial": "TESTCB2123456",
+            "camera_ip": "192.168.50.21",
+            "region": "api.eu.ezvizlife.com",
+        }
+    )
+    _, ready, message = supervisor._ready()
+    assert ready is False
+    assert "API 区域" in message
 
 
 def test_mtime_returns_none_when_state_path_is_missing(tmp_path: Path) -> None:

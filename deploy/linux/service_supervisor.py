@@ -22,7 +22,7 @@ from runtime_settings import (
     bridge_environment,
     settings_complete,
     token_is_ready,
-    token_matches_serial,
+    token_matches_identity,
 )
 from setup_wizard import DEFAULT_SETUP_HOST, WizardApplication, create_server
 from tls_config import TLSConfigError, ensure_tls_certificate
@@ -170,12 +170,16 @@ class BridgeSupervisor:
         settings = self.settings_store.load()
         if not settings_complete(settings):
             return settings, False, "等待填写完整摄像头配置"
-        if not token_matches_serial(self.token_file, str(settings["serial"])):
+        if not token_matches_identity(
+            self.token_file,
+            str(settings["serial"]),
+            str(settings["region"]),
+        ):
             if token_is_ready(self.token_file):
                 return (
                     settings,
                     False,
-                    "萤石会话尚未绑定当前摄像头，请在 Web 向导中重新登录",
+                    "萤石会话尚未绑定当前摄像头与 API 区域，请在 Web 向导中重新登录",
                 )
             return settings, False, "等待在 Web 向导中登录萤石"
         return settings, True, "配置已就绪"

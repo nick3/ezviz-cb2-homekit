@@ -47,6 +47,7 @@ case "${command}" in
       --source-dir "${EZVIZ_LEGACY_DATA_DIR:-/legacy-data}" \
       --target-dir "${data_dir}" \
       --serial "${EZVIZ_SERIAL:-}" \
+      --region "${EZVIZ_REGION:-api.ys7.com}" \
       --uid "${EZVIZ_RUNTIME_UID:-1000}" \
       --gid "${EZVIZ_RUNTIME_GID:-1000}"
     ;;

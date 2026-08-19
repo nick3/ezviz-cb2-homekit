@@ -203,10 +203,14 @@ def token_is_ready(path: Path) -> bool:
     return isinstance(value, dict) and bool(value.get("session_id"))
 
 
-def token_matches_serial(path: Path, serial: str) -> bool:
-    """Return whether a private token is explicitly bound to this camera."""
+def token_matches_identity(path: Path, serial: str, region: str) -> bool:
+    """Return whether a private token is bound to this camera and API region."""
 
     expected_serial = serial.strip().upper()
+    try:
+        expected_region = normalize_region(region)
+    except SettingsError:
+        return False
     if not expected_serial or not token_is_ready(path):
         return False
     auth_state = path.with_name(AUTH_STATE_FILE_NAME)
@@ -219,7 +223,11 @@ def token_matches_serial(path: Path, serial: str) -> bool:
     if not isinstance(value, dict):
         return False
     bound_serial = str(value.get("serial") or "").strip().upper()
-    return bool(bound_serial) and bound_serial == expected_serial
+    try:
+        bound_region = normalize_region(value.get("region"))
+    except SettingsError:
+        return False
+    return bound_serial == expected_serial and bound_region == expected_region
 
 
 def _serialize_settings(settings: Mapping[str, Any]) -> bytes:

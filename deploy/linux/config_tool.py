@@ -13,6 +13,8 @@ import stat
 import sys
 from pathlib import Path
 
+from runtime_settings import normalize_region
+
 PIN_MARKER = "__HOMEKIT_PIN__"
 AUTH_STATE_FILE_NAME = "ezviz_auth.json"
 LEGACY_MIGRATION_MARKER = ".legacy-bind-migration.json"
@@ -83,6 +85,7 @@ def _arguments() -> argparse.Namespace:
     legacy.add_argument("--source-dir", type=Path, required=True)
     legacy.add_argument("--target-dir", type=Path, required=True)
     legacy.add_argument("--serial", default="")
+    legacy.add_argument("--region", default="api.ys7.com")
     legacy.add_argument("--uid", type=_numeric_id, required=True)
     legacy.add_argument("--gid", type=_numeric_id, required=True)
 
@@ -235,6 +238,7 @@ def _legacy_marker_payload(
     source_config: bytes,
     source_token: bytes | None,
     serial: str,
+    region: str = "api.ys7.com",
 ) -> bytes:
     value = {
         "version": 1,
@@ -243,6 +247,7 @@ def _legacy_marker_payload(
             hashlib.sha256(source_token).hexdigest() if source_token is not None else ""
         ),
         "serial": serial,
+        "region": region,
     }
     return json.dumps(value, sort_keys=True).encode("utf-8") + b"\n"
 
@@ -267,15 +272,17 @@ def migrate_legacy_bind_state(
     source_dir: Path,
     target_dir: Path,
     serial: str,
+    region: str = "api.ys7.com",
     *,
     owner: tuple[int, int] | None = None,
 ) -> bool:
     """Move the old ./data bind state into an empty named volume once.
 
-    The legacy login command verified the configured serial before saving its token,
-    so a token without the newer auth sidecar may be bound only to that validated
-    legacy environment value. The HomeKit config is the final commit marker: token
-    and auth state are written first, preventing a crash from exposing a new identity.
+    The legacy login command verified the configured serial and region before saving
+    its token, so a token without the newer auth sidecar may be bound only to those
+    validated legacy environment values. The HomeKit config is the final commit
+    marker: token and auth state are written first, preventing a crash from exposing
+    a new identity.
     """
 
     target_config = target_dir / "go2rtc.yaml"
@@ -317,6 +324,7 @@ def migrate_legacy_bind_state(
             raise RuntimeError("Legacy auth binding exists without its EZVIZ token")
 
     normalized_serial = serial.strip().upper()
+    normalized_region = normalize_region(region)
     serial_is_valid = bool(normalized_serial) and bool(
         SERIAL_PATTERN.fullmatch(normalized_serial)
     )
@@ -335,11 +343,28 @@ def migrate_legacy_bind_state(
             raise RuntimeError("Legacy EZVIZ auth binding has an invalid serial")
         if bound_serial and serial_is_valid and bound_serial != normalized_serial:
             raise RuntimeError("Legacy EZVIZ auth binding does not match EZVIZ_SERIAL")
+        if bound_serial:
+            bound_region = str(auth_value.get("region") or "").strip()
+            if bound_region and normalize_region(bound_region) != normalized_region:
+                raise RuntimeError(
+                    "Legacy EZVIZ auth binding does not match EZVIZ_REGION"
+                )
+        migrated_auth: dict[str, object] = {
+            "serial": bound_serial,
+            "region": normalized_region if bound_serial else "",
+        }
+        if auth_value.get("state"):
+            migrated_auth["state"] = str(auth_value["state"])
+        source_auth = (
+            json.dumps(migrated_auth, ensure_ascii=False, indent=2).encode("utf-8")
+            + b"\n"
+        )
 
     marker_payload = _legacy_marker_payload(
         source_config,
         source_token,
         normalized_serial if serial_is_valid else "",
+        normalized_region,
     )
     target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     target_dir.chmod(0o700)
@@ -387,6 +412,7 @@ def migrate_legacy_bind_state(
                         "legacy_upgrade" if serial_is_valid else "unbound_import"
                     ),
                     "serial": normalized_serial if serial_is_valid else "",
+                    "region": normalized_region if serial_is_valid else "",
                 }
                 _secure_write(
                     target_auth,
@@ -442,7 +468,7 @@ def _import_state(args: argparse.Namespace) -> None:
         _secure_write(
             target_auth_state,
             json.dumps(
-                {"state": "unbound_import", "serial": ""},
+                {"state": "unbound_import", "serial": "", "region": ""},
                 ensure_ascii=False,
                 indent=2,
             ).encode("utf-8")
@@ -472,6 +498,7 @@ def main() -> int:
                 args.source_dir,
                 args.target_dir,
                 args.serial,
+                args.region,
                 owner=(args.uid, args.gid),
             ):
                 print("已从旧版绑定目录迁移 HomeKit 身份和萤石会话。")

@@ -26,7 +26,7 @@ from runtime_settings import (
     normalize_region,
     secure_write,
     settings_complete,
-    token_matches_serial,
+    token_matches_identity,
     usable_lan_ipv4,
 )
 
@@ -147,13 +147,15 @@ class LoginCoordinator:
         self,
         token: bytes,
         serial: str,
+        region: str,
         *,
         notify: bool = True,
     ) -> None:
+        normalized_region = normalize_region(region)
         auth_state = self.token_file.with_name(AUTH_STATE_FILE_NAME)
         secure_write(
             auth_state,
-            b'{"state":"updating","serial":""}\n',
+            b'{"state":"updating","serial":"","region":""}\n',
         )
         secure_write(
             self.token_file,
@@ -161,22 +163,24 @@ class LoginCoordinator:
         )
         secure_write(
             auth_state,
-            json.dumps({"serial": serial.upper()}, ensure_ascii=False, indent=2).encode(
-                "utf-8"
-            )
+            json.dumps(
+                {"serial": serial.upper(), "region": normalized_region},
+                ensure_ascii=False,
+                indent=2,
+            ).encode("utf-8")
             + b"\n",
         )
         if notify:
             self.reload_callback()
 
-    def _save_token(self, client: Any, serial: str) -> None:
-        self._persist_token(self._export_token(client), serial)
+    def _save_token(self, client: Any, serial: str, region: str) -> None:
+        self._persist_token(self._export_token(client), serial, region)
 
     def _stage_token(self, client: Any, serial: str, region: str) -> None:
         self._staged_token = (
             self._export_token(client),
             serial.strip().upper(),
-            region.strip().lower(),
+            normalize_region(region),
         )
 
     def commit_identification(self, serial: str, region: str) -> bool:
@@ -193,15 +197,25 @@ class LoginCoordinator:
             ):
                 self._staged_token = None
                 return False
-            self._persist_token(token, staged_serial, notify=False)
+            self._persist_token(
+                token,
+                staged_serial,
+                staged_region,
+                notify=False,
+            )
             self._staged_token = None
             return True
 
-    def _finish_configured(self, client: Any, serial: str) -> dict[str, Any]:
+    def _finish_configured(
+        self,
+        client: Any,
+        serial: str,
+        region: str,
+    ) -> dict[str, Any]:
         device = client.get_device_infos(serial)
         if not device:
             raise WizardError(f"当前萤石账号中没有找到摄像头 {serial}")
-        self._save_token(client, serial)
+        self._save_token(client, serial, region)
         return {"state": "authenticated", "message": "萤石账号验证成功"}
 
     def _finish_identify(
@@ -295,7 +309,7 @@ class LoginCoordinator:
         serial = context.get("serial", "")
         if mode == "identify":
             return self._finish_identify(client, serial, context.get("region", ""))
-        return self._finish_configured(client, serial)
+        return self._finish_configured(client, serial, context.get("region", ""))
 
     def begin(
         self,
@@ -426,8 +440,10 @@ class WizardApplication:
         return {
             "settings": settings,
             "configured": settings_complete(settings),
-            "authenticated": token_matches_serial(
-                self.token_file, str(settings.get("serial") or "")
+            "authenticated": token_matches_identity(
+                self.token_file,
+                str(settings.get("serial") or ""),
+                str(settings.get("region") or ""),
             ),
             "homekit_pin": self.pin(),
             "bridge": dict(self.bridge_status()),

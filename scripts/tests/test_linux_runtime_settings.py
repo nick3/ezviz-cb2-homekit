@@ -131,21 +131,48 @@ def test_token_requires_private_permissions_and_session_id(tmp_path: Path) -> No
 
     token.chmod(0o600)
     assert runtime_settings.token_is_ready(token) is True
-    assert runtime_settings.token_matches_serial(token, "TESTCB2123456") is False
+    assert (
+        runtime_settings.token_matches_identity(token, "TESTCB2123456", "api.ys7.com")
+        is False
+    )
 
     runtime_settings.secure_write(
         token.with_name(runtime_settings.AUTH_STATE_FILE_NAME),
-        b'{"state":"unbound_import","serial":""}\n',
+        b'{"state":"unbound_import","serial":"","region":""}\n',
     )
-    assert runtime_settings.token_matches_serial(token, "") is False
-    assert runtime_settings.token_matches_serial(token, "TESTCB2123456") is False
+    assert runtime_settings.token_matches_identity(token, "", "api.ys7.com") is False
+    assert (
+        runtime_settings.token_matches_identity(token, "TESTCB2123456", "api.ys7.com")
+        is False
+    )
 
     runtime_settings.secure_write(
         token.with_name(runtime_settings.AUTH_STATE_FILE_NAME),
         b'{"serial":"OTHER123"}\n',
     )
-    assert runtime_settings.token_matches_serial(token, "TESTCB2123456") is False
-    assert runtime_settings.token_matches_serial(token, "OTHER123") is True
+    assert (
+        runtime_settings.token_matches_identity(token, "OTHER123", "api.ys7.com")
+        is False
+    )
+
+    runtime_settings.secure_write(
+        token.with_name(runtime_settings.AUTH_STATE_FILE_NAME),
+        b'{"serial":"OTHER123","region":"api.ys7.com"}\n',
+    )
+    assert (
+        runtime_settings.token_matches_identity(token, "TESTCB2123456", "api.ys7.com")
+        is False
+    )
+    assert (
+        runtime_settings.token_matches_identity(token, "OTHER123", "api.ys7.com")
+        is True
+    )
+    assert (
+        runtime_settings.token_matches_identity(
+            token, "OTHER123", "api.eu.ezvizlife.com"
+        )
+        is False
+    )
 
 
 def test_bridge_environment_keeps_secrets_out_of_settings(tmp_path: Path) -> None:

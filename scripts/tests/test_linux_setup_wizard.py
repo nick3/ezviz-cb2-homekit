@@ -138,16 +138,42 @@ def test_mfa_login_keeps_password_only_in_memory_and_saves_private_token(
 
     second = application.run_login({"sms_code": "123456"})
     assert second["state"] == "authenticated"
-    assert runtime_settings.token_matches_serial(
-        application.token_file, "TESTCB2123456"
+    assert runtime_settings.token_matches_identity(
+        application.token_file, "TESTCB2123456", "api.ys7.com"
     )
     assert stat.S_IMODE(application.token_file.stat().st_mode) == 0o600
     assert "secret" not in application.token_file.read_text()
     assert json.loads(
         application.token_file.with_name("ezviz_auth.json").read_text()
-    ) == {"serial": "TESTCB2123456"}
+    ) == {"serial": "TESTCB2123456", "region": "api.ys7.com"}
     assert reloaded.is_set()
     assert FakeClient.instances[-1].closed is True
+
+
+def test_saving_a_new_region_requires_authentication_for_that_region(
+    tmp_path: Path,
+) -> None:
+    application, _ = _application(tmp_path)
+    runtime_settings.secure_write(
+        application.token_file,
+        b'{"session_id":"private"}\n',
+    )
+    runtime_settings.secure_write(
+        application.token_file.with_name(runtime_settings.AUTH_STATE_FILE_NAME),
+        b'{"serial":"TESTCB2123456","region":"api.ys7.com"}\n',
+    )
+    assert application.status()["authenticated"] is True
+
+    application.save_settings(
+        {
+            "settings": {
+                **application.settings_store.load(),
+                "region": "api.eu.ezvizlife.com",
+            }
+        }
+    )
+
+    assert application.status()["authenticated"] is False
 
 
 def test_cloud_assisted_identification_expands_suffix_and_returns_lan_ip(
@@ -187,8 +213,8 @@ def test_cloud_assisted_identification_expands_suffix_and_returns_lan_ip(
         }
     )
 
-    assert runtime_settings.token_matches_serial(
-        application.token_file, "TESTCB2123456"
+    assert runtime_settings.token_matches_identity(
+        application.token_file, "TESTCB2123456", "api.eu.ezvizlife.com"
     )
     assert reloaded.is_set()
 
@@ -222,7 +248,7 @@ def test_identifying_another_camera_preserves_auth_until_settings_are_saved(
     )
     runtime_settings.secure_write(
         auth_state,
-        b'{"serial":"TESTCB2123456"}\n',
+        b'{"serial":"TESTCB2123456","region":"api.ys7.com"}\n',
     )
     old_token = application.token_file.read_bytes()
     old_binding = auth_state.read_bytes()
@@ -242,8 +268,8 @@ def test_identifying_another_camera_preserves_auth_until_settings_are_saved(
     assert identified["state"] == "identified_no_ip"
     assert application.token_file.read_bytes() == old_token
     assert auth_state.read_bytes() == old_binding
-    assert runtime_settings.token_matches_serial(
-        application.token_file, "TESTCB2123456"
+    assert runtime_settings.token_matches_identity(
+        application.token_file, "TESTCB2123456", "api.ys7.com"
     )
     assert reloaded.is_set() is False
 
@@ -262,9 +288,12 @@ def test_identifying_another_camera_preserves_auth_until_settings_are_saved(
         "session_id": "new-session",
         "api_url": "https://api.ys7.com",
     }
-    assert json.loads(auth_state.read_text()) == {"serial": "OTHERCAM654321"}
-    assert runtime_settings.token_matches_serial(
-        application.token_file, "OTHERCAM654321"
+    assert json.loads(auth_state.read_text()) == {
+        "serial": "OTHERCAM654321",
+        "region": "api.ys7.com",
+    }
+    assert runtime_settings.token_matches_identity(
+        application.token_file, "OTHERCAM654321", "api.ys7.com"
     )
     assert reloaded.is_set()
 
@@ -297,7 +326,7 @@ def test_failed_token_replacement_leaves_the_binding_invalidated(
     )
     runtime_settings.secure_write(
         application.token_file.with_name(runtime_settings.AUTH_STATE_FILE_NAME),
-        b'{"serial":"TESTCB2123456"}\n',
+        b'{"serial":"TESTCB2123456","region":"api.ys7.com"}\n',
     )
     real_secure_write = setup_wizard.secure_write
 
@@ -317,7 +346,7 @@ def test_failed_token_replacement_leaves_the_binding_invalidated(
 
     assert json.loads(
         application.token_file.with_name("ezviz_auth.json").read_text()
-    ) == {"state": "updating", "serial": ""}
+    ) == {"state": "updating", "serial": "", "region": ""}
     assert json.loads(application.token_file.read_text()) == {
         "session_id": "old-session"
     }
