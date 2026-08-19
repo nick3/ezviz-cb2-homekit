@@ -715,7 +715,7 @@ def test_reload_server_certificate_swaps_the_live_tls_context(
     assert server.tls_context is renewed_context
 
 
-def test_tls_handshake_runs_in_a_bounded_worker_thread() -> None:
+def test_tls_handshake_and_http_reads_have_bounded_worker_timeouts() -> None:
     handshake_started = threading.Event()
     release_handshake = threading.Event()
     request_finished = threading.Event()
@@ -755,7 +755,10 @@ def test_tls_handshake_runs_in_a_bounded_worker_thread() -> None:
     assert request.timeouts == [setup_wizard.TLS_HANDSHAKE_TIMEOUT_SECONDS]
     release_handshake.set()
     assert request_finished.wait(1)
-    assert request.timeouts == [setup_wizard.TLS_HANDSHAKE_TIMEOUT_SECONDS, None]
+    assert request.timeouts == [
+        setup_wizard.TLS_HANDSHAKE_TIMEOUT_SECONDS,
+        setup_wizard.HTTP_REQUEST_TIMEOUT_SECONDS,
+    ]
 
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "127.0.0.1", "camera.local"])

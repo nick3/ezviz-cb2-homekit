@@ -33,6 +33,7 @@ MAX_REQUEST_BYTES = 64 * 1024
 PENDING_LOGIN_SECONDS = 300
 STAGED_TOKEN_SECONDS = 300
 TLS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
+HTTP_REQUEST_TIMEOUT_SECONDS = 15.0
 DEFAULT_SETUP_HOST = "0.0.0.0"  # noqa: S104 - HTTPS plus a LAN allowlist is intentional.
 TRUSTED_IPV4_NETWORKS = tuple(
     ipaddress.ip_network(value)
@@ -695,7 +696,7 @@ class ReusableThreadingHTTPServer(ThreadingHTTPServer):
                 raise RuntimeError("HTTPS 服务尚未配置 TLS 上下文")
             request.settimeout(TLS_HANDSHAKE_TIMEOUT_SECONDS)
             tls_request = context.wrap_socket(request, server_side=True)
-            tls_request.settimeout(None)
+            tls_request.settimeout(HTTP_REQUEST_TIMEOUT_SECONDS)
         except (OSError, RuntimeError):
             self.shutdown_request(tls_request or request)
             return
