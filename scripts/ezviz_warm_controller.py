@@ -44,6 +44,7 @@ PRELOAD_PROFILES = {
     ),
 }
 ACTIVITY_GRACE_SECONDS = 30
+ACTIVITY_MARKER_MAX_AGE_SECONDS = 30
 MQTT_FALLBACK_GRACE_SECONDS = 10
 MQTT_RECREATE_SECONDS = 120
 
@@ -226,17 +227,24 @@ def _load_token(path: Path) -> dict[str, Any]:
     return value
 
 
-def activity_is_live(path: Path) -> bool:
+def activity_is_live(path: Path, *, now: float | None = None) -> bool:
     try:
+        current = time.time() if now is None else now
+        if abs(current - path.stat().st_mtime) > ACTIVITY_MARKER_MAX_AGE_SECONDS:
+            return False
         value = json.loads(path.read_text(encoding="utf-8"))
         pid = _to_int(value.get("pid")) if isinstance(value, dict) else None
         if pid is None or pid <= 0:
             return False
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    try:
         os.kill(pid, 0)
         return True
     except PermissionError:
         return True
-    except (FileNotFoundError, ProcessLookupError, json.JSONDecodeError, OSError):
+    except (ProcessLookupError, OSError):
         return False
 
 

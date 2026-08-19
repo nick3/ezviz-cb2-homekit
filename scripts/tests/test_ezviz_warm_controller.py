@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import stat
 import sys
+import time
 from typing import Any
 
 
@@ -317,3 +318,23 @@ def test_activity_marker_can_be_reasserted_after_overlapping_process_exits(
 
     assert probe._refresh_stream_active(marker, pid=101) is True
     assert json.loads(marker.read_text())["pid"] == 101
+
+    stale_at = time.time() - probe.ACTIVITY_MARKER_MAX_AGE_SECONDS - 1
+    os.utime(marker, (stale_at, stale_at))
+    assert probe._activity_marker_owned(marker, pid=101) is False
+    assert probe._refresh_stream_active(marker, pid=101) is True
+    assert marker.stat().st_mtime > stale_at
+
+
+def test_activity_marker_rejects_stale_reused_pid(tmp_path: Path) -> None:
+    marker = tmp_path / "active.json"
+    marker.write_text(f'{{"pid":{os.getpid()}}}', encoding="utf-8")
+    now = time.time()
+    stale_at = now - controller.ACTIVITY_MARKER_MAX_AGE_SECONDS - 1
+    os.utime(marker, (stale_at, stale_at))
+
+    assert controller.activity_is_live(marker, now=now) is False
+
+    future_at = now + controller.ACTIVITY_MARKER_MAX_AGE_SECONDS + 1
+    os.utime(marker, (future_at, future_at))
+    assert controller.activity_is_live(marker, now=now) is False

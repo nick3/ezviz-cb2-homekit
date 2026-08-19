@@ -8,11 +8,9 @@ import (
 )
 
 func (s *Stream) AddConsumer(cons core.Consumer) (err error) {
-	// A new reader reuses any producer retained by the linger window.
-	s.cancelLingerStop()
-
-	// support for multiple simultaneous pending from different consumers
-	consN := s.pending.Add(1) - 1
+	// Admit the reader and cancel linger under the same lock used by expiry.
+	// This makes the boundary either a completed stop or a retained producer.
+	consN := s.beginConsumerAdd()
 
 	var prodErrors = make([]error, len(s.producers))
 	var prodMedias []*core.Media

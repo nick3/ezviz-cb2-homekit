@@ -28,6 +28,7 @@ LEGACY_YS7_CAS_CERT_SHA256 = (
     "234e9cde3a0c2a77d93023f0e4611c10231877c77c007c4efb92ab2d15408424"
 )
 ACTIVITY_MARK_INTERVAL_SECONDS = 10.0
+ACTIVITY_MARKER_MAX_AGE_SECONDS = 30.0
 sys.path.insert(0, str(PY_EZVIZ_DIR))
 sys.path.insert(0, str(PROJECT_DIR / "scripts"))
 
@@ -322,20 +323,35 @@ def _mark_stream_active(path: Path | None, *, pid: int | None = None) -> bool:
     return True
 
 
-def _activity_marker_owned(path: Path | None, *, pid: int | None = None) -> bool:
+def _activity_marker_owned(
+    path: Path | None,
+    *,
+    pid: int | None = None,
+    now: float | None = None,
+) -> bool:
     if path is None:
         return False
     owner = os.getpid() if pid is None else pid
     try:
+        current = time.time() if now is None else now
+        if abs(current - path.stat().st_mtime) > ACTIVITY_MARKER_MAX_AGE_SECONDS:
+            return False
         value = json.loads(path.read_text(encoding="utf-8"))
         return isinstance(value, dict) and value.get("pid") == owner
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError):
         return False
 
 
 def _refresh_stream_active(path: Path | None, *, pid: int | None = None) -> bool:
     if _activity_marker_owned(path, pid=pid):
-        return True
+        assert path is not None
+        try:
+            refreshed_at = time.time()
+            os.utime(path, (refreshed_at, refreshed_at))
+            if _activity_marker_owned(path, pid=pid, now=refreshed_at):
+                return True
+        except OSError:
+            pass
     return _mark_stream_active(path, pid=pid)
 
 

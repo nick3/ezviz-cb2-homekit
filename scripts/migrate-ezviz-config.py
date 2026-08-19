@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -71,6 +72,26 @@ def _secure_write(path: Path, content: str) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def _secure_backup(config: Path, source: str) -> Path:
+    payload = source.encode("utf-8")
+    backup = config.with_name(f"{config.name}.pre-v{CONFIG_VERSION}.bak")
+    if backup.exists():
+        backup.chmod(0o600)
+        if backup.read_bytes() == payload:
+            return backup
+        digest = hashlib.sha256(payload).hexdigest()[:16]
+        backup = config.with_name(
+            f"{config.name}.pre-v{CONFIG_VERSION}.{digest}.bak"
+        )
+        if backup.exists():
+            backup.chmod(0o600)
+            if backup.read_bytes() != payload:
+                raise RuntimeError("配置备份哈希冲突，拒绝覆盖现有备份")
+            return backup
+    _secure_write(backup, source)
+    return backup
 
 
 def _is_current(text: str) -> bool:
@@ -195,11 +216,7 @@ def upgrade(config: Path) -> bool:
     if not _is_current(migrated):
         raise RuntimeError("迁移后的配置未通过结构校验")
 
-    backup = config.with_name(f"{config.name}.pre-v{CONFIG_VERSION}.bak")
-    if not backup.exists():
-        _secure_write(backup, source)
-    else:
-        backup.chmod(0o600)
+    _secure_backup(config, source)
     _secure_write(config, migrated)
     return True
 

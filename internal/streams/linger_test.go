@@ -12,10 +12,22 @@ import (
 
 type lingerTestProducer struct {
 	core.Connection
+	stopStarted chan struct{}
+	allowStop   <-chan struct{}
 }
 
 func (p *lingerTestProducer) Start() error {
 	return nil
+}
+
+func (p *lingerTestProducer) Stop() error {
+	if p.stopStarted != nil {
+		close(p.stopStarted)
+	}
+	if p.allowStop != nil {
+		<-p.allowStop
+	}
+	return p.Connection.Stop()
 }
 
 func producerConnected(p *Producer) bool {
@@ -101,4 +113,41 @@ func TestFailedConsumerRestoresLingerWindow(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return !producerConnected(producer)
 	}, time.Second, 5*time.Millisecond)
+}
+
+func TestLingerExpiryCommitsBeforeNewConsumerAdmission(t *testing.T) {
+	stream, producer, consumer := newLingerTestStream(t, time.Millisecond)
+	connection := producer.conn.(*lingerTestProducer)
+	connection.stopStarted = make(chan struct{})
+	allowStop := make(chan struct{})
+	connection.allowStop = allowStop
+
+	stream.RemoveConsumer(consumer)
+	select {
+	case <-connection.stopStarted:
+	case <-time.After(time.Second):
+		t.Fatal("linger expiry did not start stopping the producer")
+	}
+
+	if stream.mu.TryLock() {
+		stream.mu.Unlock()
+		close(allowStop)
+		t.Fatal("linger expiry released the stream before producer stop committed")
+	}
+
+	admitted := make(chan int32, 1)
+	go func() {
+		admitted <- stream.beginConsumerAdd()
+	}()
+
+	close(allowStop)
+	select {
+	case consN := <-admitted:
+		require.Equal(t, int32(0), consN)
+	case <-time.After(time.Second):
+		t.Fatal("consumer admission did not resume after producer stop")
+	}
+	require.False(t, producerConnected(producer))
+	require.Equal(t, int32(1), stream.pending.Load())
+	stream.pending.Add(-1)
 }

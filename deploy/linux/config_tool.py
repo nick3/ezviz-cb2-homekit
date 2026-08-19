@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -97,6 +98,27 @@ def _secure_write(path: Path, data: bytes) -> None:
         raise
 
 
+def _secure_backup(target: Path, data: bytes) -> Path:
+    backup = target.with_name(f"{target.name}.pre-v{CONFIG_VERSION}.bak")
+    if backup.exists():
+        backup.chmod(0o600)
+        if backup.read_bytes() == data:
+            return backup
+        digest = hashlib.sha256(data).hexdigest()[:16]
+        backup = target.with_name(
+            f"{target.name}.pre-v{CONFIG_VERSION}.{digest}.bak"
+        )
+        if backup.exists():
+            backup.chmod(0o600)
+            if backup.read_bytes() != data:
+                raise RuntimeError(
+                    "Config backup hash collision; refusing to overwrite it"
+                )
+            return backup
+    _secure_write(backup, data)
+    return backup
+
+
 def _render_new_config(template: Path) -> str:
     text = template.read_text(encoding="utf-8")
     if text.count(PIN_MARKER) != 1:
@@ -150,9 +172,7 @@ def _upgrade(template: Path, target: Path) -> bool:
 
     migrated = _render_new_config(template)
     migrated = _replace_section(migrated, "homekit", homekit)
-    backup = target.with_name(f"{target.name}.pre-v{CONFIG_VERSION}.bak")
-    if not backup.exists():
-        _secure_write(backup, source_config.encode())
+    _secure_backup(target, source_config.encode())
     _secure_write(target, migrated.encode())
     return True
 

@@ -117,3 +117,29 @@ def test_upgrade_refuses_unknown_ezviz_source_without_writing(
     assert not config.with_name(
         f"{config.name}.pre-v{migration.CONFIG_VERSION}.bak"
     ).exists()
+
+
+def test_upgrade_preserves_current_source_when_fixed_backup_conflicts(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "go2rtc.yaml"
+    original = _legacy_config()
+    config.write_text(original)
+    fixed_backup = config.with_name(
+        f"{config.name}.pre-v{migration.CONFIG_VERSION}.bak"
+    )
+    fixed_backup.write_text("older backup")
+    fixed_backup.chmod(0o644)
+
+    assert migration.upgrade(config) is True
+
+    unique_backups = list(
+        tmp_path.glob(
+            f"{config.name}.pre-v{migration.CONFIG_VERSION}.*.bak"
+        )
+    )
+    assert fixed_backup.read_text() == "older backup"
+    assert stat.S_IMODE(fixed_backup.stat().st_mode) == 0o600
+    assert len(unique_backups) == 1
+    assert unique_backups[0].read_text() == original
+    assert stat.S_IMODE(unique_backups[0].stat().st_mode) == 0o600

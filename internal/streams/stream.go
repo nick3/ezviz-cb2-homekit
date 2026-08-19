@@ -79,12 +79,24 @@ func (s *Stream) SetLinger(duration time.Duration) {
 
 func (s *Stream) cancelLingerStop() {
 	s.mu.Lock()
+	s.cancelLingerStopLocked()
+	s.mu.Unlock()
+}
+
+func (s *Stream) cancelLingerStopLocked() {
 	if s.stopTimer != nil {
 		s.stopTimer.Stop()
 		s.stopTimer = nil
 		s.stopGeneration++
 	}
+}
+
+func (s *Stream) beginConsumerAdd() int32 {
+	s.mu.Lock()
+	consN := s.pending.Add(1) - 1
+	s.cancelLingerStopLocked()
 	s.mu.Unlock()
+	return consN
 }
 
 func (s *Stream) scheduleStopProducers() {
@@ -108,10 +120,10 @@ func (s *Stream) scheduleStopProducers() {
 			return
 		}
 		s.stopTimer = nil
-		s.mu.Unlock()
 
 		log.Debug().Dur("linger", delay).Msg("[streams] linger expired")
-		s.stopProducers()
+		s.stopProducersLocked()
+		s.mu.Unlock()
 	})
 	s.mu.Unlock()
 
@@ -152,12 +164,17 @@ func (s *Stream) RemoveProducer(prod core.Producer) {
 }
 
 func (s *Stream) stopProducers() {
+	s.mu.Lock()
+	s.stopProducersLocked()
+	s.mu.Unlock()
+}
+
+func (s *Stream) stopProducersLocked() {
 	if s.pending.Load() > 0 {
 		log.Trace().Msg("[streams] skip stop pending producer")
 		return
 	}
 
-	s.mu.Lock()
 producers:
 	for _, producer := range s.producers {
 		for _, track := range producer.receivers {
@@ -172,7 +189,6 @@ producers:
 		}
 		producer.stop()
 	}
-	s.mu.Unlock()
 }
 
 func (s *Stream) MarshalJSON() ([]byte, error) {

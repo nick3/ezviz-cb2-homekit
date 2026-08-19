@@ -92,6 +92,39 @@ log:
     assert backup.read_text() == old_config
 
 
+def test_upgrade_preserves_current_source_when_fixed_backup_conflicts(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "data" / "go2rtc.yaml"
+    target.parent.mkdir()
+    old_config = """streams:
+  ezviz:
+    - old-managed-source
+homekit:
+  ezviz:
+    pin: 321-54-678
+"""
+    target.write_text(old_config)
+    fixed_backup = target.with_name(
+        f"{target.name}.pre-v{config_tool.CONFIG_VERSION}.bak"
+    )
+    fixed_backup.write_text("older backup")
+    fixed_backup.chmod(0o644)
+
+    assert config_tool._upgrade(_template(), target) is True
+
+    unique_backups = list(
+        target.parent.glob(
+            f"{target.name}.pre-v{config_tool.CONFIG_VERSION}.*.bak"
+        )
+    )
+    assert fixed_backup.read_text() == "older backup"
+    assert stat.S_IMODE(fixed_backup.stat().st_mode) == 0o600
+    assert len(unique_backups) == 1
+    assert unique_backups[0].read_text() == old_config
+    assert stat.S_IMODE(unique_backups[0].stat().st_mode) == 0o600
+
+
 def test_import_keeps_homekit_state_but_uses_linux_stream(tmp_path: Path) -> None:
     source_config = tmp_path / "mac.yaml"
     source_config.write_text(
