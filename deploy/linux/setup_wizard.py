@@ -651,8 +651,15 @@ class ReusableThreadingHTTPServerIPv6(ReusableThreadingHTTPServer):
     address_family = socket.AF_INET6
 
 
+def _server_host(host: str) -> str:
+    value = host.strip()
+    if value.startswith("[") and value.endswith("]"):
+        return value[1:-1]
+    return value
+
+
 def _server_class(host: str) -> type[ReusableThreadingHTTPServer]:
-    value = host.strip().strip("[]").split("%", 1)[0]
+    value = _server_host(host).split("%", 1)[0]
     try:
         address = ipaddress.ip_address(value)
     except ValueError:
@@ -670,7 +677,8 @@ def create_server(
     certificate: Path,
     private_key: Path,
 ) -> ThreadingHTTPServer:
-    server = _server_class(host)((host, port), _handler(application))
+    bind_host = _server_host(host)
+    server = _server_class(bind_host)((bind_host, port), _handler(application))
     try:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2

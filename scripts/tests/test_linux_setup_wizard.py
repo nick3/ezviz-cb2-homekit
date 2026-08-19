@@ -513,11 +513,77 @@ def test_same_origin_accepts_http_and_https_for_the_exact_host() -> None:
     )
 
 
-@pytest.mark.parametrize("host", ["::", "::1", "fd12::10", "fe80::1%eth0"])
+@pytest.mark.parametrize(
+    "host",
+    ["::", "::1", "fd12::10", "fe80::1%eth0", "[fd12::10]", "[fe80::1%eth0]"],
+)
 def test_setup_server_selects_ipv6_address_family(host: str) -> None:
     assert (
         setup_wizard._server_class(host).address_family == setup_wizard.socket.AF_INET6
     )
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("[fd12::10]", "fd12::10"),
+        ("[fe80::1%eth0]", "fe80::1%eth0"),
+        (" 192.168.50.10 ", "192.168.50.10"),
+        ("camera.local", "camera.local"),
+    ],
+)
+def test_setup_server_normalizes_the_bind_host(host: str, expected: str) -> None:
+    assert setup_wizard._server_host(host) == expected
+
+
+def test_create_server_binds_with_an_unbracketed_ipv6_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, _ = _application(tmp_path)
+    selected_hosts: list[str] = []
+    bound_addresses: list[tuple[str, int]] = []
+
+    class Server:
+        socket = object()
+
+        def server_close(self) -> None:
+            pass
+
+    class Context:
+        minimum_version: ssl.TLSVersion
+
+        def load_cert_chain(self, _certificate: str, _private_key: str) -> None:
+            pass
+
+        def wrap_socket(self, sock: object, *, server_side: bool) -> object:
+            assert server_side is True
+            return sock
+
+    def server_factory(
+        address: tuple[str, int],
+        _handler: object,
+    ) -> Server:
+        bound_addresses.append(address)
+        return Server()
+
+    def select_server(host: str) -> Callable[..., Server]:
+        selected_hosts.append(host)
+        return server_factory
+
+    monkeypatch.setattr(setup_wizard, "_server_class", select_server)
+    monkeypatch.setattr(setup_wizard.ssl, "SSLContext", lambda _protocol: Context())
+
+    setup_wizard.create_server(
+        application,
+        "[fe80::1%eth0]",
+        8099,
+        certificate=tmp_path / "certificate.pem",
+        private_key=tmp_path / "key.pem",
+    )
+
+    assert selected_hosts == ["fe80::1%eth0"]
+    assert bound_addresses == [("fe80::1%eth0", 8099)]
 
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "127.0.0.1", "camera.local"])

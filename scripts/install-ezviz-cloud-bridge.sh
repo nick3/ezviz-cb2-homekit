@@ -93,18 +93,7 @@ fi
     tests/test_cas.py
 )
 
-"$venv_dir/bin/python" -m pytest -q \
-  "$project_dir/scripts/tests/test_ezviz_direct_media.py" \
-  "$project_dir/scripts/tests/test_ezviz_network_lock.py" \
-  "$project_dir/scripts/tests/test_ezviz_warm_controller.py" \
-  "$project_dir/scripts/tests/test_macos_config_migration.py" \
-  "$project_dir/scripts/tests/test_linux_config_tool.py" \
-  "$project_dir/scripts/tests/test_linux_runtime_settings.py" \
-  "$project_dir/scripts/tests/test_ezviz_discovery.py" \
-  "$project_dir/scripts/tests/test_linux_setup_wizard.py" \
-  "$project_dir/scripts/tests/test_linux_service_supervisor.py" \
-  "$project_dir/scripts/tests/test_linux_healthcheck.py" \
-  "$project_dir/scripts/tests/test_linux_manage.py"
+"$venv_dir/bin/python" -m pytest -q "$project_dir/scripts/tests"
 
 (
   cd "$project_dir"
