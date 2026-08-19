@@ -94,7 +94,7 @@ def _validate_certificate_subject_alt_names(
             option = "-checkip"
         else:
             raise ValueError(f"不支持的证书 SAN 类型：{kind}")
-        subprocess.run(  # noqa: S603 - executable is an absolute verified file
+        result = subprocess.run(  # noqa: S603 - executable is verified
             [
                 openssl_bin,
                 "x509",
@@ -110,6 +110,11 @@ def _validate_certificate_subject_alt_names(
             timeout=10,
             env={**os.environ, "LC_ALL": "C"},
         )
+        # OpenSSL 3.0 reports an identity mismatch with status 0, while newer
+        # releases use a non-zero status. Require its explicit C-locale match
+        # result so both behaviours reject a stale certificate.
+        if " does match certificate" not in result.stdout:
+            raise ValueError(f"证书未覆盖当前 SAN：{alt_name}")
 
 
 def _fingerprint(certificate: Path) -> str:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import ssl
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -146,3 +147,28 @@ def test_tls_identity_is_renewed_when_required_sans_change(
     )
     assert reused.created is False
     assert reused.fingerprint == renewed.fingerprint
+
+
+def test_san_validation_rejects_mismatch_with_zero_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def successful_mismatch(
+        *args: object,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args[0],
+            0,
+            stdout="IP 192.168.50.11 does NOT match certificate\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(tls_config.subprocess, "run", successful_mismatch)
+
+    with pytest.raises(ValueError, match="证书未覆盖当前 SAN"):
+        tls_config._validate_certificate_subject_alt_names(
+            tmp_path / "certificate.pem",
+            ["IP:192.168.50.11"],
+            "/usr/bin/openssl",
+        )
