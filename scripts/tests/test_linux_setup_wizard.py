@@ -229,6 +229,22 @@ def test_mfa_completion_failure_closes_and_discards_pending_client(
         application.run_login({"sms_code": "123456"})
 
 
+def test_only_waiting_is_healthy_before_authentication(tmp_path: Path) -> None:
+    application, _ = _application(tmp_path)
+
+    healthy, _ = application.healthy()
+    assert healthy is True
+
+    application.bridge_status = lambda: {
+        "state": "error",
+        "message": "HomeKit 配置初始化失败",
+    }
+    healthy, status = application.healthy()
+
+    assert healthy is False
+    assert status["bridge"]["state"] == "error"
+
+
 def test_abandoned_mfa_login_is_closed_when_its_timer_expires(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -379,6 +395,20 @@ def test_same_origin_accepts_http_and_https_for_the_exact_host() -> None:
     assert (
         setup_wizard._same_origin("https://attacker.example", "camera.local:8099")
         is False
+    )
+
+
+@pytest.mark.parametrize("host", ["::", "::1", "fd12::10", "fe80::1%eth0"])
+def test_setup_server_selects_ipv6_address_family(host: str) -> None:
+    assert (
+        setup_wizard._server_class(host).address_family == setup_wizard.socket.AF_INET6
+    )
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "127.0.0.1", "camera.local"])
+def test_setup_server_keeps_ipv4_address_family(host: str) -> None:
+    assert (
+        setup_wizard._server_class(host).address_family == setup_wizard.socket.AF_INET
     )
 
 

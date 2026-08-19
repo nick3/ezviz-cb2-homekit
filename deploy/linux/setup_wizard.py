@@ -6,6 +6,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import secrets
+import socket
 import ssl
 import threading
 import time
@@ -436,11 +437,12 @@ class WizardApplication:
         status = self.status()
         bridge = status["bridge"]
         ready = status["configured"] and status["authenticated"]
-        healthy = not ready or bridge.get("state") in {
-            "starting",
-            "running",
-            "restarting",
-        }
+        state = bridge.get("state")
+        healthy = (
+            state in {"starting", "running", "restarting"}
+            if ready
+            else state == "waiting"
+        )
         return healthy, status
 
     def close(self) -> None:
@@ -587,6 +589,21 @@ class ReusableThreadingHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
 
+class ReusableThreadingHTTPServerIPv6(ReusableThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+def _server_class(host: str) -> type[ReusableThreadingHTTPServer]:
+    value = host.strip().strip("[]").split("%", 1)[0]
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return ReusableThreadingHTTPServer
+    if isinstance(address, ipaddress.IPv6Address):
+        return ReusableThreadingHTTPServerIPv6
+    return ReusableThreadingHTTPServer
+
+
 def create_server(
     application: WizardApplication,
     host: str,
@@ -595,7 +612,7 @@ def create_server(
     certificate: Path,
     private_key: Path,
 ) -> ThreadingHTTPServer:
-    server = ReusableThreadingHTTPServer((host, port), _handler(application))
+    server = _server_class(host)((host, port), _handler(application))
     try:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
