@@ -3,12 +3,15 @@ from __future__ import annotations
 import importlib.util
 import json
 import stat
+import sys
 from pathlib import Path
 
 import pytest
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
-MODULE_PATH = PROJECT_DIR / "deploy" / "linux" / "config_tool.py"
+LINUX_DIR = PROJECT_DIR / "deploy" / "linux"
+MODULE_PATH = LINUX_DIR / "config_tool.py"
+sys.path.insert(0, str(LINUX_DIR))
 SPEC = importlib.util.spec_from_file_location("linux_config_tool", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 config_tool = importlib.util.module_from_spec(SPEC)
@@ -196,7 +199,7 @@ log:
     assert stat.S_IMODE(auth_state.stat().st_mode) == 0o600
 
 
-def test_legacy_bind_migration_preserves_pairing_and_binds_verified_token(
+def test_legacy_bind_migration_preserves_pairing_and_marks_token_unbound(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "legacy"
@@ -223,9 +226,9 @@ def test_legacy_bind_migration_preserves_pairing_and_binds_verified_token(
     assert "client_id=private" in target_config.read_text()
     assert target_token.read_bytes() == source_token.read_bytes()
     assert json.loads(target_auth.read_text()) == {
-        "state": "legacy_upgrade",
-        "serial": "TESTCB2123456",
-        "region": "api.eu.ezvizlife.com",
+        "state": "unbound_import",
+        "serial": "",
+        "region": "",
     }
     assert stat.S_IMODE(target_config.stat().st_mode) == 0o600
     assert stat.S_IMODE(target_token.stat().st_mode) == 0o600
@@ -237,6 +240,64 @@ def test_legacy_bind_migration_preserves_pairing_and_binds_verified_token(
     assert config_tool.CONFIG_VERSION_LINE in upgraded
     assert "client_id=private" in upgraded
     assert "legacy-source" not in upgraded
+
+
+def test_legacy_bind_migration_preserves_a_complete_auth_sidecar(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "legacy"
+    source.mkdir()
+    (source / "go2rtc.yaml").write_text(_legacy_config())
+    token = source / "ezviz_token.json"
+    token.write_text('{"session_id":"private"}\n')
+    token.chmod(0o600)
+    auth = source / config_tool.AUTH_STATE_FILE_NAME
+    auth.write_text('{"serial":"TESTCB2123456","region":"api.eu.ezvizlife.com"}\n')
+    auth.chmod(0o600)
+    target = tmp_path / "named-volume"
+
+    assert config_tool.migrate_legacy_bind_state(
+        source,
+        target,
+        "TESTCB2123456",
+        "api.eu.ezvizlife.com",
+    )
+
+    assert json.loads((target / config_tool.AUTH_STATE_FILE_NAME).read_text()) == {
+        "serial": "TESTCB2123456",
+        "region": "api.eu.ezvizlife.com",
+    }
+
+
+def test_legacy_bind_migration_marks_a_transitional_auth_sidecar_unbound(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "legacy"
+    source.mkdir()
+    (source / "go2rtc.yaml").write_text(_legacy_config())
+    token = source / "ezviz_token.json"
+    token.write_text('{"session_id":"private"}\n')
+    token.chmod(0o600)
+    auth = source / config_tool.AUTH_STATE_FILE_NAME
+    auth.write_text(
+        '{"state":"legacy_upgrade","serial":"TESTCB2123456",'
+        '"region":"api.eu.ezvizlife.com"}\n'
+    )
+    auth.chmod(0o600)
+    target = tmp_path / "named-volume"
+
+    assert config_tool.migrate_legacy_bind_state(
+        source,
+        target,
+        "TESTCB2123456",
+        "api.eu.ezvizlife.com",
+    )
+
+    assert json.loads((target / config_tool.AUTH_STATE_FILE_NAME).read_text()) == {
+        "state": "unbound_import",
+        "serial": "",
+        "region": "",
+    }
 
 
 def test_legacy_bind_migration_rejects_a_conflicting_bound_region(

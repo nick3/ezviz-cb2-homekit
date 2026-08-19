@@ -157,6 +157,15 @@ def test_token_requires_private_permissions_and_session_id(tmp_path: Path) -> No
 
     runtime_settings.secure_write(
         token.with_name(runtime_settings.AUTH_STATE_FILE_NAME),
+        b'{"state":"legacy_upgrade","serial":"OTHER123","region":"api.ys7.com"}\n',
+    )
+    assert (
+        runtime_settings.token_matches_identity(token, "OTHER123", "api.ys7.com")
+        is False
+    )
+
+    runtime_settings.secure_write(
+        token.with_name(runtime_settings.AUTH_STATE_FILE_NAME),
         b'{"serial":"OTHER123","region":"api.ys7.com"}\n',
     )
     assert (

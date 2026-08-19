@@ -222,6 +222,8 @@ def token_matches_identity(path: Path, serial: str, region: str) -> bool:
         return False
     if not isinstance(value, dict):
         return False
+    if value.get("state"):
+        return False
     bound_serial = str(value.get("serial") or "").strip().upper()
     try:
         bound_region = normalize_region(value.get("region"))

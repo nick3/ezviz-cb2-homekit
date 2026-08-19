@@ -278,11 +278,11 @@ def migrate_legacy_bind_state(
 ) -> bool:
     """Move the old ./data bind state into an empty named volume once.
 
-    The legacy login command verified the configured serial and region before saving
-    its token, so a token without the newer auth sidecar may be bound only to those
-    validated legacy environment values. The HomeKit config is the final commit
-    marker: token and auth state are written first, preventing a crash from exposing
-    a new identity.
+    Mutable legacy environment values are never used to authenticate a copied token.
+    Only a complete existing auth sidecar retains its serial and region binding;
+    otherwise the token is imported as unbound and requires a fresh login. The
+    HomeKit config is the final commit marker: token and auth state are written first,
+    preventing a crash from exposing a new identity.
     """
 
     target_config = target_dir / "go2rtc.yaml"
@@ -341,20 +341,29 @@ def migrate_legacy_bind_state(
         bound_serial = str(auth_value.get("serial") or "").strip().upper()
         if bound_serial and SERIAL_PATTERN.fullmatch(bound_serial) is None:
             raise RuntimeError("Legacy EZVIZ auth binding has an invalid serial")
-        if bound_serial and serial_is_valid and bound_serial != normalized_serial:
-            raise RuntimeError("Legacy EZVIZ auth binding does not match EZVIZ_SERIAL")
-        if bound_serial:
-            bound_region = str(auth_value.get("region") or "").strip()
-            if bound_region and normalize_region(bound_region) != normalized_region:
+        bound_region = str(auth_value.get("region") or "").strip()
+        bound_state = str(auth_value.get("state") or "").strip()
+        complete_binding = bool(bound_serial and bound_region) and not bound_state
+        if complete_binding:
+            normalized_bound_region = normalize_region(bound_region)
+            if serial_is_valid and bound_serial != normalized_serial:
+                raise RuntimeError(
+                    "Legacy EZVIZ auth binding does not match EZVIZ_SERIAL"
+                )
+            if normalized_bound_region != normalized_region:
                 raise RuntimeError(
                     "Legacy EZVIZ auth binding does not match EZVIZ_REGION"
                 )
-        migrated_auth: dict[str, object] = {
-            "serial": bound_serial,
-            "region": normalized_region if bound_serial else "",
-        }
-        if auth_value.get("state"):
-            migrated_auth["state"] = str(auth_value["state"])
+            migrated_auth: dict[str, object] = {
+                "serial": bound_serial,
+                "region": normalized_bound_region,
+            }
+        else:
+            migrated_auth = {
+                "state": "unbound_import",
+                "serial": "",
+                "region": "",
+            }
         source_auth = (
             json.dumps(migrated_auth, ensure_ascii=False, indent=2).encode("utf-8")
             + b"\n"
@@ -408,11 +417,9 @@ def migrate_legacy_bind_state(
                 _secure_write(target_auth, source_auth)
             else:
                 auth_state = {
-                    "state": (
-                        "legacy_upgrade" if serial_is_valid else "unbound_import"
-                    ),
-                    "serial": normalized_serial if serial_is_valid else "",
-                    "region": normalized_region if serial_is_valid else "",
+                    "state": "unbound_import",
+                    "serial": "",
+                    "region": "",
                 }
                 _secure_write(
                     target_auth,
