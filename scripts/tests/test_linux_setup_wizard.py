@@ -219,6 +219,85 @@ def test_cloud_assisted_identification_expands_suffix_and_returns_lan_ip(
     assert reloaded.is_set()
 
 
+def test_staged_identification_tokens_expire_and_cannot_be_published(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ImmediateClient(FakeClient):
+        def login(self, sms_code: int | None = None) -> None:
+            pass
+
+    class FakeTimer:
+        def __init__(
+            self,
+            interval: float,
+            function: Callable[..., None],
+            args: tuple[object, ...] = (),
+        ) -> None:
+            self.interval = interval
+            self.function = function
+            self.args = args
+            self.daemon = False
+            self.started = False
+            self.cancelled = False
+            timers.append(self)
+
+        def start(self) -> None:
+            self.started = True
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        def fire(self) -> None:
+            self.function(*self.args)
+
+    now = [100.0]
+    timers: list[FakeTimer] = []
+    monkeypatch.setattr(setup_wizard.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(setup_wizard.threading, "Timer", FakeTimer)
+
+    def identify(coordinator: setup_wizard.LoginCoordinator) -> FakeTimer:
+        result = coordinator.begin(
+            account="owner",
+            password="secret",  # noqa: S106 - synthetic test credential
+            serial="123456",
+            region="api.ys7.com",
+            mode="identify",
+        )
+        timer = timers[-1]
+        assert result["state"] == "identified"
+        assert timer.started is True
+        assert timer.daemon is True
+        assert timer.interval == setup_wizard.STAGED_TOKEN_SECONDS
+        return timer
+
+    active_token = tmp_path / "active-token.json"
+    active = setup_wizard.LoginCoordinator(
+        active_token,
+        reload_callback=lambda: None,
+        dependencies=(ImmediateClient, VerificationRequired, ApiError),
+    )
+    active_timer = identify(active)
+    active_timer.fire()
+
+    assert active_timer.cancelled is True
+    assert active.commit_identification("TESTCB2123456", "api.ys7.com") is False
+    assert active_token.exists() is False
+
+    delayed_token = tmp_path / "delayed-token.json"
+    delayed = setup_wizard.LoginCoordinator(
+        delayed_token,
+        reload_callback=lambda: None,
+        dependencies=(ImmediateClient, VerificationRequired, ApiError),
+    )
+    delayed_timer = identify(delayed)
+    now[0] += setup_wizard.STAGED_TOKEN_SECONDS
+
+    assert delayed.commit_identification("TESTCB2123456", "api.ys7.com") is False
+    assert delayed_timer.cancelled is True
+    assert delayed_token.exists() is False
+
+
 def test_identifying_another_camera_preserves_auth_until_settings_are_saved(
     tmp_path: Path,
 ) -> None:

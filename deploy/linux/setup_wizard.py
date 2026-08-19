@@ -31,6 +31,7 @@ from runtime_settings import (
 
 MAX_REQUEST_BYTES = 64 * 1024
 PENDING_LOGIN_SECONDS = 300
+STAGED_TOKEN_SECONDS = 300
 TLS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 DEFAULT_SETUP_HOST = "0.0.0.0"  # noqa: S104 - HTTPS plus a LAN allowlist is intentional.
 TRUSTED_IPV4_NETWORKS = tuple(
@@ -97,7 +98,8 @@ class LoginCoordinator:
         self.discover = discover
         self._pending: tuple[Any, dict[str, str], float] | None = None
         self._pending_timer: threading.Timer | None = None
-        self._staged_token: tuple[bytes, str, str] | None = None
+        self._staged_token: tuple[bytes, str, str, float, object] | None = None
+        self._staged_timer: threading.Timer | None = None
         self._lock = threading.RLock()
 
     def _dependencies(
@@ -137,6 +139,33 @@ class LoginCoordinator:
         self._pending_timer = timer
         timer.start()
 
+    def _clear_staged(self) -> None:
+        timer = self._staged_timer
+        self._staged_timer = None
+        if timer is not None:
+            timer.cancel()
+        self._staged_token = None
+
+    def _expire_staged(self, generation: object) -> None:
+        with self._lock:
+            staged = self._staged_token
+            if staged is not None and staged[4] is generation:
+                self._clear_staged()
+
+    def _schedule_staged_expiry(
+        self,
+        generation: object,
+        expires_at: float,
+    ) -> None:
+        timer = threading.Timer(
+            max(0.0, expires_at - time.monotonic()),
+            self._expire_staged,
+            args=(generation,),
+        )
+        timer.daemon = True
+        self._staged_timer = timer
+        timer.start()
+
     def _export_token(self, client: Any) -> bytes:
         token = client.export_token()
         if not isinstance(token, dict) or not token.get("session_id"):
@@ -159,11 +188,17 @@ class LoginCoordinator:
         self._persist_token(self._export_token(client), serial, region)
 
     def _stage_token(self, client: Any, serial: str, region: str) -> None:
+        self._clear_staged()
+        expires_at = time.monotonic() + STAGED_TOKEN_SECONDS
+        generation = object()
         self._staged_token = (
             self._export_token(client),
             serial.strip().upper(),
             normalize_region(region),
+            expires_at,
+            generation,
         )
+        self._schedule_staged_expiry(generation, expires_at)
 
     def commit_identification(self, serial: str, region: str) -> bool:
         """Publish a staged identify token only with its selected settings."""
@@ -172,12 +207,15 @@ class LoginCoordinator:
             staged = self._staged_token
             if staged is None:
                 return False
-            token, staged_serial, staged_region = staged
+            token, staged_serial, staged_region, expires_at, _ = staged
+            if time.monotonic() >= expires_at:
+                self._clear_staged()
+                return False
             if (serial.strip().upper(), region.strip().lower()) != (
                 staged_serial,
                 staged_region,
             ):
-                self._staged_token = None
+                self._clear_staged()
                 return False
             self._persist_token(
                 token,
@@ -185,7 +223,7 @@ class LoginCoordinator:
                 staged_region,
                 notify=False,
             )
-            self._staged_token = None
+            self._clear_staged()
             return True
 
     def _finish_configured(
@@ -307,7 +345,7 @@ class LoginCoordinator:
             raise WizardError("请输入萤石账号和密码")
         with self._lock:
             self._close_pending()
-            self._staged_token = None
+            self._clear_staged()
             client_factory, verification_error, api_error = self._dependencies()
             client = client_factory(account, password, region)
             try:
@@ -373,7 +411,7 @@ class LoginCoordinator:
     def close(self) -> None:
         with self._lock:
             self._close_pending()
-            self._staged_token = None
+            self._clear_staged()
 
 
 class WizardApplication:
