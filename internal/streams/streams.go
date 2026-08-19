@@ -16,6 +16,7 @@ func Init() {
 		Streams map[string]any    `yaml:"streams"`
 		Publish map[string]any    `yaml:"publish"`
 		Preload map[string]string `yaml:"preload"`
+		Linger  map[string]string `yaml:"linger"`
 	}
 
 	app.LoadConfig(&cfg)
@@ -23,7 +24,17 @@ func Init() {
 	log = app.GetLogger("streams")
 
 	for name, item := range cfg.Streams {
-		streams[name] = NewStream(item)
+		stream := NewStream(item)
+		if rawDuration := cfg.Linger[name]; rawDuration != "" {
+			duration, err := time.ParseDuration(rawDuration)
+			if err != nil || duration < 0 {
+				log.Error().Str("stream", name).Str("linger", rawDuration).
+					Msg("[streams] invalid linger duration")
+			} else {
+				stream.SetLinger(duration)
+			}
+		}
+		streams[name] = stream
 	}
 
 	api.HandleFunc("api/streams", apiStreams)

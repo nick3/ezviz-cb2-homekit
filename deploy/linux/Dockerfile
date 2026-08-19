@@ -58,6 +58,7 @@ RUN python -m pip install --disable-pip-version-check --no-cache-dir \
 COPY --from=go2rtc-build /out/go2rtc /usr/local/bin/go2rtc
 WORKDIR /app
 COPY scripts/probe-ezviz-direct-reverse.py /app/scripts/
+COPY scripts/ezviz_warm_controller.py /app/scripts/
 COPY scripts/ezviz_direct_media.py /app/scripts/
 COPY scripts/ezviz_network_lock.py /app/scripts/
 COPY scripts/login-ezviz-cloud.py /app/scripts/
@@ -66,6 +67,7 @@ COPY deploy/linux/ /app/deploy/linux/
 RUN chmod 0755 \
       /usr/local/bin/go2rtc \
       /app/scripts/probe-ezviz-direct-reverse.py \
+      /app/scripts/ezviz_warm_controller.py \
       /app/scripts/login-ezviz-cloud.py \
       /app/deploy/linux/entrypoint.sh \
       /app/deploy/linux/manage.sh \

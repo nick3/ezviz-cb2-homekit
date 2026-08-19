@@ -126,6 +126,14 @@ def _arguments() -> argparse.Namespace:
         type=Path,
         help="Optional 0600 file for the raw direct-reverse media connection",
     )
+    parser.add_argument(
+        "--activity-file",
+        type=Path,
+        help=(
+            "Optional 0600 runtime marker used by the warm-stream controller; "
+            "it contains only this process ID and start time"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -283,6 +291,44 @@ def _open_capture(path: Path | None) -> Any | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     return os.fdopen(descriptor, "wb")
+
+
+def _mark_stream_active(path: Path | None) -> bool:
+    if path is None:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    payload = json.dumps(
+        {"pid": os.getpid(), "started_at": int(time.time())},
+        separators=(",", ":"),
+    ).encode("ascii")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return True
+
+
+def _clear_stream_active(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(value, dict) and value.get("pid") == os.getpid():
+            path.unlink(missing_ok=True)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return
 
 
 def _handle_callback_connection(
@@ -545,6 +591,8 @@ def main() -> int:
     output_status = 0
     output_bytes = 0
     output_broken = False
+    activity_marked = False
+    activity_attempted = False
     try:
         with media_connection:
             media_connection.settimeout(0.5)
@@ -563,6 +611,12 @@ def main() -> int:
                 now = time.monotonic()
                 first_data_at = first_data_at or now
                 last_data_at = now
+                if not activity_attempted and args.activity_file is not None:
+                    activity_attempted = True
+                    try:
+                        activity_marked = _mark_stream_active(args.activity_file)
+                    except OSError as err:
+                        _report(f"媒体活动标记写入失败：{err}。")
                 total_bytes += len(chunk)
                 if len(sample) < 1024 * 1024:
                     sample.extend(chunk[: 1024 * 1024 - len(sample)])
@@ -581,6 +635,8 @@ def main() -> int:
                     output_broken = True
                     break
     finally:
+        if activity_marked:
+            _clear_stream_active(args.activity_file)
         if capture is not None:
             capture.close()
         if not output_broken:

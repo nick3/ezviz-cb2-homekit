@@ -116,6 +116,7 @@ func (s *Stream) AddInternalProducer(conn core.Producer) {
 }
 
 func (s *Stream) AddInternalConsumer(conn core.Consumer) {
+	s.cancelLingerStop()
 	s.mu.Lock()
 	s.consumers = append(s.consumers, conn)
 	s.mu.Unlock()

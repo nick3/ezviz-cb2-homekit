@@ -8,6 +8,9 @@ import (
 )
 
 func (s *Stream) AddConsumer(cons core.Consumer) (err error) {
+	// A new reader reuses any producer retained by the linger window.
+	s.cancelLingerStop()
+
 	// support for multiple simultaneous pending from different consumers
 	consN := s.pending.Add(1) - 1
 

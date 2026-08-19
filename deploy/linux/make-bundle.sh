@@ -29,6 +29,7 @@ tar -czf "${output}" \
   pkg \
   www \
   scripts/probe-ezviz-direct-reverse.py \
+  scripts/ezviz_warm_controller.py \
   scripts/ezviz_direct_media.py \
   scripts/ezviz_network_lock.py \
   scripts/login-ezviz-cloud.py \

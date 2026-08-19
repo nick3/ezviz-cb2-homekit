@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
 )
@@ -13,6 +14,10 @@ type Stream struct {
 	consumers []core.Consumer
 	mu        sync.Mutex
 	pending   atomic.Int32
+
+	linger         time.Duration
+	stopTimer      *time.Timer
+	stopGeneration uint64
 }
 
 func NewStream(source any) *Stream {
@@ -61,6 +66,58 @@ func (s *Stream) SetSource(source string) {
 	}
 }
 
+func (s *Stream) SetLinger(duration time.Duration) {
+	s.mu.Lock()
+	s.linger = duration
+	if duration <= 0 && s.stopTimer != nil {
+		s.stopTimer.Stop()
+		s.stopTimer = nil
+		s.stopGeneration++
+	}
+	s.mu.Unlock()
+}
+
+func (s *Stream) cancelLingerStop() {
+	s.mu.Lock()
+	if s.stopTimer != nil {
+		s.stopTimer.Stop()
+		s.stopTimer = nil
+		s.stopGeneration++
+	}
+	s.mu.Unlock()
+}
+
+func (s *Stream) scheduleStopProducers() {
+	s.mu.Lock()
+	if len(s.consumers) != 0 || s.linger <= 0 {
+		s.mu.Unlock()
+		s.stopProducers()
+		return
+	}
+
+	if s.stopTimer != nil {
+		s.stopTimer.Stop()
+	}
+	s.stopGeneration++
+	generation := s.stopGeneration
+	delay := s.linger
+	s.stopTimer = time.AfterFunc(delay, func() {
+		s.mu.Lock()
+		if s.stopGeneration != generation {
+			s.mu.Unlock()
+			return
+		}
+		s.stopTimer = nil
+		s.mu.Unlock()
+
+		log.Debug().Dur("linger", delay).Msg("[streams] linger expired")
+		s.stopProducers()
+	})
+	s.mu.Unlock()
+
+	log.Debug().Dur("linger", delay).Msg("[streams] keep producers warm")
+}
+
 func (s *Stream) RemoveConsumer(cons core.Consumer) {
 	_ = cons.Stop()
 
@@ -73,7 +130,7 @@ func (s *Stream) RemoveConsumer(cons core.Consumer) {
 	}
 	s.mu.Unlock()
 
-	s.stopProducers()
+	s.scheduleStopProducers()
 }
 
 func (s *Stream) AddProducer(prod core.Producer) {

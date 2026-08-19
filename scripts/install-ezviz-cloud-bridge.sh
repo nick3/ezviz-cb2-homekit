@@ -71,6 +71,7 @@ fi
 "$venv_dir/bin/python" -m pytest -q \
   "$project_dir/scripts/tests/test_ezviz_direct_media.py" \
   "$project_dir/scripts/tests/test_ezviz_network_lock.py" \
+  "$project_dir/scripts/tests/test_ezviz_warm_controller.py" \
   "$project_dir/scripts/tests/test_linux_config_tool.py"
 
 if [[ ! -x /opt/homebrew/bin/ffmpeg ]] || [[ ! -x /opt/homebrew/bin/ffprobe ]]; then
@@ -78,12 +79,10 @@ if [[ ! -x /opt/homebrew/bin/ffmpeg ]] || [[ ! -x /opt/homebrew/bin/ffprobe ]]; 
   exit 1
 fi
 
-if [[ ! -x "$go2rtc_binary" ]]; then
-  (
-    cd "$project_dir"
-    GOCACHE="$project_dir/.tmp/go-build-cache" go test ./internal/homekit ./internal/ffmpeg ./internal/streams
-    GOCACHE="$project_dir/.tmp/go-build-cache" go build -o "$go2rtc_binary" .
-  )
-fi
+(
+  cd "$project_dir"
+  GOCACHE="$project_dir/.tmp/go-build-cache" go test ./internal/homekit ./internal/streams
+  GOCACHE="$project_dir/.tmp/go-build-cache" go build -o "$go2rtc_binary" .
+)
 
 echo "CB2 局域网反向直连适配器和 HomeKit 桥接依赖均已安装并通过测试。"
