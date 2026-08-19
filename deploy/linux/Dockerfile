@@ -43,7 +43,7 @@ RUN for patch_file in /patches/*.patch; do \
 FROM python:${PYTHON_VERSION}
 
 RUN apt-get update \
-    && packages="ca-certificates ffmpeg libseccomp2 mesa-va-drivers tini tzdata" \
+    && packages="ca-certificates ffmpeg libseccomp2 mesa-va-drivers openssl tini tzdata" \
     && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
          packages="${packages} intel-media-va-driver"; \
        fi \
@@ -52,7 +52,7 @@ RUN apt-get update \
 
 COPY --from=pyezviz-build /wheels/ /wheels/
 RUN python -m pip install --disable-pip-version-check --no-cache-dir \
-      --no-index --find-links=/wheels pyezvizapi \
+      --no-index --find-links=/wheels pyezvizapi defusedxml==0.7.1 \
     && rm -rf /wheels
 
 COPY --from=go2rtc-build /out/go2rtc /usr/local/bin/go2rtc
@@ -71,7 +71,8 @@ RUN chmod 0755 \
       /app/scripts/login-ezviz-cloud.py \
       /app/deploy/linux/entrypoint.sh \
       /app/deploy/linux/manage.sh \
-      /app/deploy/linux/make-bundle.sh
+      /app/deploy/linux/make-bundle.sh \
+    && install -d -o 1000 -g 1000 -m 0700 /data
 
 ARG TARGETARCH
 ARG BUILDARCH
@@ -86,7 +87,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     EZVIZ_DATA_DIR=/data \
     FFMPEG_BIN=/usr/bin/ffmpeg
 
-EXPOSE 1984/tcp 8443/udp 39000/tcp
+EXPOSE 1984/tcp 8099/tcp 8443/udp 39000/tcp
 VOLUME ["/data"]
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/deploy/linux/entrypoint.sh"]
 CMD ["start"]

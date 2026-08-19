@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EZVIZ HomeKit 配置向导</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #19211d;
+      --muted: #66716b;
+      --line: #dce4df;
+      --surface: rgba(255, 255, 255, .92);
+      --green: #126f4b;
+      --green-soft: #e8f5ef;
+      --amber: #966310;
+      --amber-soft: #fff4d9;
+      --red: #b53a32;
+      --shadow: 0 24px 70px rgba(25, 45, 35, .12);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 5%, rgba(140, 215, 178, .34), transparent 30rem),
+        radial-gradient(circle at 94% 12%, rgba(254, 210, 127, .22), transparent 26rem),
+        #f3f7f4;
+      font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    .shell { width: min(1060px, calc(100% - 32px)); margin: 36px auto; }
+    .topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin-bottom: 20px; }
+    .brand { display: flex; align-items: center; gap: 14px; }
+    .mark {
+      display: grid; place-items: center; width: 48px; height: 48px; border-radius: 15px;
+      color: white; background: linear-gradient(145deg, #17895e, #0c5d3e); box-shadow: 0 10px 26px rgba(18,111,75,.26);
+      font-weight: 800; letter-spacing: -.06em;
+    }
+    h1 { margin: 0; font-size: clamp(23px, 3vw, 32px); letter-spacing: -.035em; }
+    .subtitle { margin: 3px 0 0; color: var(--muted); }
+    .status-pill { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,.68); white-space: nowrap; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #9aa39f; }
+    .dot.running { background: #18a56d; box-shadow: 0 0 0 4px rgba(24,165,109,.12); }
+    .dot.waiting, .dot.starting, .dot.restarting { background: #d49524; }
+    .dot.error { background: var(--red); }
+    .layout { display: grid; grid-template-columns: 230px minmax(0, 1fr); overflow: hidden; border: 1px solid rgba(210,221,214,.9); border-radius: 24px; background: var(--surface); box-shadow: var(--shadow); backdrop-filter: blur(18px); }
+    .steps { padding: 28px 20px; border-right: 1px solid var(--line); background: rgba(246,250,247,.72); }
+    .step-link { display: flex; align-items: center; gap: 12px; width: 100%; margin: 0 0 8px; padding: 11px; border: 0; border-radius: 13px; color: var(--muted); background: transparent; text-align: left; }
+    .step-link.active { color: var(--green); background: var(--green-soft); font-weight: 650; }
+    .step-link.done .step-number { color: white; border-color: var(--green); background: var(--green); }
+    .step-number { display: grid; place-items: center; flex: 0 0 28px; height: 28px; border: 1px solid #bdc9c2; border-radius: 50%; font-size: 13px; }
+    .trust-note { margin-top: 28px; padding: 13px; border-radius: 12px; color: #756027; background: var(--amber-soft); font-size: 12px; }
+    main { min-height: 650px; padding: clamp(26px, 5vw, 52px); }
+    .panel { display: none; animation: rise .2s ease-out; }
+    .panel.active { display: block; }
+    @keyframes rise { from { opacity: .25; transform: translateY(5px); } }
+    h2 { margin: 0 0 8px; font-size: 25px; letter-spacing: -.025em; }
+    h3 { margin: 24px 0 10px; font-size: 16px; }
+    .lead { margin: 0 0 28px; color: var(--muted); max-width: 680px; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+    .field { min-width: 0; }
+    .field.full { grid-column: 1 / -1; }
+    label { display: block; margin-bottom: 7px; font-weight: 650; }
+    .hint { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
+    input, select {
+      width: 100%; min-height: 45px; padding: 10px 12px; border: 1px solid #cbd6cf; border-radius: 11px; color: var(--ink); background: #fff; outline: none;
+    }
+    input:focus, select:focus { border-color: #4a9c79; box-shadow: 0 0 0 3px rgba(74,156,121,.13); }
+    .inline { display: flex; gap: 10px; }
+    .inline input { flex: 1; }
+    .button { min-height: 44px; padding: 10px 17px; border: 1px solid transparent; border-radius: 11px; font-weight: 650; transition: .15s ease; }
+    .button:hover { transform: translateY(-1px); }
+    .button:disabled { cursor: wait; opacity: .58; transform: none; }
+    .primary { color: #fff; background: var(--green); }
+    .secondary { color: var(--ink); border-color: #cbd6cf; background: #fff; }
+    .actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 34px; padding-top: 22px; border-top: 1px solid var(--line); }
+    .actions .right { display: flex; gap: 10px; margin-left: auto; }
+    .discover-box { margin: 22px 0; padding: 18px; border: 1px solid var(--line); border-radius: 16px; background: #f8fbf9; }
+    .discover-head { display: flex; justify-content: space-between; align-items: center; gap: 18px; }
+    .discover-head strong { display: block; }
+    .discover-head p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+    .results { display: grid; gap: 9px; margin-top: 14px; }
+    .device { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; padding: 13px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+    .device.match { border-color: #78b899; background: #f4fbf7; }
+    .device-title { font-weight: 700; }
+    .device-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .empty { padding: 12px; color: var(--muted); border: 1px dashed #c9d5ce; border-radius: 10px; text-align: center; }
+    .assist-box { margin: 18px 0; padding: 18px; border: 1px solid #ead9ad; border-radius: 16px; background: #fffbf0; }
+    .assist-box h3 { margin: 0 0 4px; }
+    .assist-box > p { margin: 0 0 15px; color: var(--muted); font-size: 13px; }
+    details { margin-top: 22px; border: 1px solid var(--line); border-radius: 13px; background: #fafcfb; }
+    summary { padding: 13px 15px; cursor: pointer; font-weight: 650; }
+    .advanced { padding: 4px 15px 16px; }
+    .notice { margin: 18px 0; padding: 13px 15px; border-radius: 12px; color: #4d6558; background: var(--green-soft); }
+    .error-box { display: none; margin: 16px 0; padding: 12px 14px; border-radius: 11px; color: #852b26; background: #fdecea; }
+    .error-box.show { display: block; }
+    .success-card { padding: 28px; border: 1px solid #b9dcc9; border-radius: 18px; background: linear-gradient(145deg, #f5fcf8, #eaf7f0); text-align: center; }
+    .check { display: grid; place-items: center; width: 54px; height: 54px; margin: 0 auto 16px; border-radius: 50%; color: white; background: var(--green); font-size: 27px; }
+    .pin { display: inline-block; margin: 12px 0; padding: 12px 18px; border: 1px dashed #76a98f; border-radius: 12px; background: #fff; font: 750 24px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; }
+    .summary-list { display: grid; gap: 8px; margin: 22px 0; text-align: left; }
+    .summary-row { display: flex; justify-content: space-between; gap: 18px; padding: 10px 0; border-bottom: 1px solid rgba(110,150,129,.2); }
+    .summary-row span:first-child { color: var(--muted); }
+    .toast { position: fixed; right: 20px; bottom: 20px; max-width: 380px; padding: 12px 15px; border-radius: 12px; color: #fff; background: #25332c; box-shadow: 0 12px 35px rgba(0,0,0,.2); opacity: 0; transform: translateY(10px); pointer-events: none; transition: .2s; }
+    .toast.show { opacity: 1; transform: none; }
+    @media (max-width: 760px) {
+      .shell { width: min(100% - 20px, 680px); margin: 18px auto; }
+      .topbar { display: block; }
+      .status-pill { margin-top: 14px; }
+      .layout { grid-template-columns: 1fr; }
+      .steps { display: flex; overflow-x: auto; padding: 12px; border-right: 0; border-bottom: 1px solid var(--line); }
+      .step-link { flex: 0 0 auto; width: auto; margin: 0 4px 0 0; }
+      .step-label { display: none; }
+      .trust-note { display: none; }
+      main { min-height: 0; padding: 24px 18px; }
+      .grid { grid-template-columns: 1fr; }
+      .field.full { grid-column: auto; }
+      .discover-head { align-items: flex-start; flex-direction: column; }
+      .inline { flex-direction: column; }
+      .actions { align-items: stretch; flex-direction: column; }
+      .actions .right { width: 100%; margin: 0; }
+      .actions .button { flex: 1; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="mark">E</div>
+        <div>
+          <h1>EZVIZ HomeKit</h1>
+          <p class="subtitle">局域网直连桥接配置向导</p>
+        </div>
+      </div>
+      <div class="status-pill"><span id="statusDot" class="dot waiting"></span><span id="statusText">正在读取状态…</span></div>
+    </header>
+
+    <div class="layout">
+      <nav class="steps" aria-label="配置步骤">
+        <button id="step-0" class="step-link active" data-goto="0" type="button" aria-current="step" aria-controls="panel-0"><span class="step-number">1</span><span class="step-label">查找摄像头</span></button>
+        <button id="step-1" class="step-link" data-goto="1" type="button" aria-controls="panel-1"><span class="step-number">2</span><span class="step-label">设置工作策略</span></button>
+        <button id="step-2" class="step-link" data-goto="2" type="button" aria-controls="panel-2"><span class="step-number">3</span><span class="step-label">登录萤石</span></button>
+        <button id="step-3" class="step-link" data-goto="3" type="button" aria-controls="panel-3"><span class="step-number">4</span><span class="step-label">接入家庭</span></button>
+        <div class="trust-note">此页面会接收萤石登录信息，请只在可信家庭局域网中使用，不要映射到公网。</div>
+      </nav>
+
+      <main>
+        <div id="globalError" class="error-box" role="alert"></div>
+
+        <section id="panel-0" class="panel active" data-panel="0" aria-labelledby="step-0">
+          <h2>先找到你的摄像头</h2>
+          <p class="lead">向导会在当前局域网发送只读 SADP 发现请求。它不会尝试登录摄像头，也不会扫描每个 IP 的端口。</p>
+
+          <div class="field">
+            <label for="serial">摄像头序列号</label>
+            <input id="serial" autocomplete="off" spellcheck="false" placeholder="例如 ABC123456，支持先输入末 6 位筛选">
+            <span class="hint">自动搜索成功后会替换为完整序列号。</span>
+          </div>
+
+          <div class="discover-box">
+            <div class="discover-head">
+              <div><strong>局域网自动搜索</strong><p id="discoverMessage">摄像头和 Linux 服务器需要处于同一 VLAN。</p></div>
+              <button id="discoverButton" class="button secondary" type="button">自动搜索</button>
+            </div>
+            <div id="deviceResults" class="results"></div>
+          </div>
+
+          <div class="assist-box">
+            <h3>电池摄像头正在休眠？</h3>
+            <p>输入序列号末 4 位以上并临时登录萤石。向导会从账号设备元数据中取得完整序列号和最近的局域网 IP；如元数据没有 IP，还会尝试唤醒后再次执行 SADP 搜索。</p>
+            <div class="grid">
+              <div class="field full"><label for="region">萤石 API 区域</label><input id="region" value="api.ys7.com"><span class="hint">中国区通常保持默认；区域账号请填写官方 *.ezvizlife.com 地址。</span></div>
+              <div class="field"><label for="findAccount">萤石账号</label><input id="findAccount" autocomplete="username" placeholder="手机号或登录名"></div>
+              <div class="field"><label for="findPassword">萤石账号密码</label><input id="findPassword" type="password" autocomplete="current-password"></div>
+            </div>
+            <span class="hint">凭据仅用于本次识别，不会保存。成功后只保存会话令牌。</span>
+            <div id="findSmsArea" class="notice" hidden>
+              <label for="findSmsCode">短信验证码</label>
+              <div class="inline"><input id="findSmsCode" inputmode="numeric" autocomplete="one-time-code" placeholder="输入验证码"><button id="findSmsButton" class="button primary" type="button">验证并查找</button></div>
+            </div>
+            <div style="margin-top: 14px"><button id="identifyButton" class="button secondary" type="button">登录萤石辅助查找</button></div>
+          </div>
+
+          <div class="field">
+            <label for="cameraIp">摄像头 IP</label>
+            <input id="cameraIp" inputmode="decimal" autocomplete="off" placeholder="自动搜索后填入，也可手动输入">
+            <span class="hint">建议在路由器中为这个地址设置 DHCP 保留。</span>
+          </div>
+
+          <div class="actions"><div class="right"><button class="button primary" data-next type="button">下一步</button></div></div>
+        </section>
+
+        <section id="panel-1" class="panel" data-panel="1" aria-labelledby="step-1" hidden>
+          <h2>选择日常工作方式</h2>
+          <p class="lead">默认策略适合电池与常电两种状态：保持原始流温热，只有打开“家庭”时才进行 HomeKit 转码。</p>
+
+          <div class="grid">
+            <div class="field full">
+              <label for="homekitName">家庭 App 中显示的名称</label>
+              <input id="homekitName" maxlength="64" value="EZVIZ CB2">
+            </div>
+            <div class="field">
+              <label for="powerMode">供电模式</label>
+              <select id="powerMode"><option value="auto">自动识别（推荐）</option><option value="battery">纯电池</option><option value="mains">持续插电</option></select>
+            </div>
+            <div class="field">
+              <label for="transcode">HomeKit 转码</label>
+              <select id="transcode"><option value="on_demand">打开家庭时启动（推荐）</option><option value="continuous">持续转码，打开更快</option></select>
+            </div>
+            <div class="field">
+              <label for="warmSeconds">电池保温时长</label>
+              <select id="warmSeconds"><option value="300">5 分钟</option><option value="600">10 分钟（推荐）</option><option value="1200">20 分钟</option><option value="1800">30 分钟</option></select>
+            </div>
+            <div class="field">
+              <label for="pirPreheat">移动事件提前预热</label>
+              <select id="pirPreheat"><option value="on">开启（推荐）</option><option value="off">关闭</option></select>
+            </div>
+          </div>
+
+          <details>
+            <summary>高级网络与编码设置</summary>
+            <div class="advanced grid">
+              <div class="field"><label for="listenIp">Linux 主机 LAN IP</label><input id="listenIp" inputmode="decimal" placeholder="留空自动判断"><span class="hint">多网卡时建议明确填写。</span></div>
+              <div class="field"><label for="callbackPort">摄像头回连端口</label><input id="callbackPort" type="number" min="1" max="65535" value="39000"></div>
+              <div class="field"><label for="encoder">编码器</label><select id="encoder"><option value="software">CPU 软件编码（推荐）</option><option value="auto">自动硬件编码</option><option value="vaapi">VAAPI</option><option value="cuda">NVIDIA CUDA</option><option value="v4l2m2m">V4L2 M2M</option><option value="rkmpp">Rockchip MPP</option></select></div>
+              <div class="field"><label for="timezone">时区</label><input id="timezone" value="Asia/Shanghai"></div>
+              <div class="field"><label for="pirPoll">PIR 备用轮询周期（秒）</label><input id="pirPoll" type="number" min="5" max="300" value="15"></div>
+              <div class="field"><label for="powerRefresh">供电状态刷新周期（秒）</label><input id="powerRefresh" type="number" min="30" value="300"></div>
+            </div>
+          </details>
+
+          <div class="actions"><button class="button secondary" data-back type="button">上一步</button><div class="right"><button id="saveButton" class="button primary" type="button">保存并继续</button></div></div>
+        </section>
+
+        <section id="panel-2" class="panel" data-panel="2" aria-labelledby="step-2" hidden>
+          <h2>验证你的萤石账号</h2>
+          <p class="lead">云端仅用于鉴权、唤醒和邀请摄像头反向连接。视频建立后仍由摄像头直接传到这台 Linux 服务器。</p>
+          <div id="alreadyAuthenticated" class="notice" hidden>已保存可用的萤石会话，可直接进入下一步；重新登录会安全替换旧会话。</div>
+          <div class="grid">
+            <div class="field full"><label for="account">萤石账号</label><input id="account" autocomplete="username" placeholder="手机号或登录名"></div>
+            <div class="field full"><label for="password">萤石账号密码</label><input id="password" type="password" autocomplete="current-password"><span class="hint">账号和密码只用于本次登录，不会写入磁盘。</span></div>
+          </div>
+          <div id="smsArea" class="notice" hidden>
+            <label for="smsCode">短信验证码</label>
+            <div class="inline"><input id="smsCode" inputmode="numeric" autocomplete="one-time-code" placeholder="输入验证码"><button id="smsButton" class="button primary" type="button">验证</button></div>
+          </div>
+          <div class="actions"><button class="button secondary" data-back type="button">上一步</button><div class="right"><button id="skipLogin" class="button secondary" type="button" hidden>使用现有会话</button><button id="loginButton" class="button primary" type="button">登录并验证设备</button></div></div>
+        </section>
+
+        <section id="panel-3" class="panel" data-panel="3" aria-labelledby="step-3" hidden>
+          <h2>最后，在“家庭”中添加摄像头</h2>
+          <p class="lead">桥接服务会在配置完成后自动启动，不需要再次重启容器。</p>
+          <div class="success-card">
+            <div class="check">✓</div>
+            <h3 id="finishTitle">配置已经保存</h3>
+            <p id="finishMessage">正在等待桥接服务启动…</p>
+            <div>HomeKit 配对码</div>
+            <div id="homekitPin" class="pin">--- -- ---</div>
+            <p class="hint">打开 iPhone“家庭” → 添加配件 → 更多选项，选择此摄像头并输入配对码。</p>
+            <div class="summary-list">
+              <div class="summary-row"><span>摄像头</span><strong id="summaryCamera">—</strong></div>
+              <div class="summary-row"><span>局域网地址</span><strong id="summaryIp">—</strong></div>
+              <div class="summary-row"><span>转码策略</span><strong id="summaryTranscode">—</strong></div>
+            </div>
+            <button class="button secondary" data-goto="0" type="button">重新检查配置</button>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <div id="toast" class="toast" role="status"></div>
+
+  <script>
+    const csrfToken = "__CSRF_TOKEN__";
+    let currentStep = 0;
+    let currentStatus = null;
+    let initialized = false;
+    let autoDiscoveryStarted = false;
+
+    const byId = id => document.getElementById(id);
+    const panels = [...document.querySelectorAll('[data-panel]')];
+    const stepLinks = [...document.querySelectorAll('.step-link')];
+
+    function showError(message = '') {
+      const box = byId('globalError');
+      box.textContent = message;
+      box.classList.toggle('show', Boolean(message));
+      if (message) box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+    function toast(message) {
+      const node = byId('toast');
+      node.textContent = message;
+      node.classList.add('show');
+      clearTimeout(node.timer);
+      node.timer = setTimeout(() => node.classList.remove('show'), 2600);
+    }
+    async function api(path, body) {
+      const options = body === undefined ? {} : {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify(body)
+      };
+      const response = await fetch(path, options);
+      const value = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(value.error || `请求失败（${response.status}）`);
+      return value;
+    }
+    function showStep(index) {
+      currentStep = Math.max(0, Math.min(3, index));
+      panels.forEach((panel, i) => {
+        panel.classList.toggle('active', i === currentStep);
+        panel.hidden = i !== currentStep;
+      });
+      stepLinks.forEach((link, i) => {
+        link.classList.toggle('active', i === currentStep);
+        link.classList.toggle('done', i < currentStep);
+        if (i === currentStep) link.setAttribute('aria-current', 'step');
+        else link.removeAttribute('aria-current');
+      });
+      showError();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    function fillSettings(settings) {
+      const mapping = {
+        serial: 'serial', camera_ip: 'cameraIp', listen_ip: 'listenIp', callback_port: 'callbackPort',
+        encoder: 'encoder', power_mode: 'powerMode', homekit_transcode: 'transcode', warm_seconds: 'warmSeconds',
+        pir_preheat: 'pirPreheat', pir_poll_seconds: 'pirPoll', power_refresh_seconds: 'powerRefresh',
+        region: 'region', homekit_name: 'homekitName', timezone: 'timezone'
+      };
+      Object.entries(mapping).forEach(([key, id]) => {
+        if (settings[key] !== undefined && settings[key] !== '') byId(id).value = settings[key];
+      });
+    }
+    function collectSettings() {
+      return {
+        version: 1,
+        serial: byId('serial').value.trim(),
+        camera_ip: byId('cameraIp').value.trim(),
+        listen_ip: byId('listenIp').value.trim(),
+        callback_port: Number(byId('callbackPort').value),
+        encoder: byId('encoder').value,
+        power_mode: byId('powerMode').value,
+        homekit_transcode: byId('transcode').value,
+        warm_seconds: Number(byId('warmSeconds').value),
+        pir_preheat: byId('pirPreheat').value,
+        pir_poll_seconds: Number(byId('pirPoll').value),
+        power_refresh_seconds: Number(byId('powerRefresh').value),
+        region: byId('region').value.trim(),
+        homekit_name: byId('homekitName').value.trim(),
+        timezone: byId('timezone').value.trim()
+      };
+    }
+    function updateStatus(status) {
+      currentStatus = status;
+      const bridge = status.bridge || {};
+      byId('statusDot').className = `dot ${bridge.state || 'waiting'}`;
+      byId('statusText').textContent = bridge.message || '等待配置';
+      byId('alreadyAuthenticated').hidden = !status.authenticated;
+      byId('skipLogin').hidden = !status.authenticated;
+      byId('homekitPin').textContent = status.homekit_pin || '--- -- ---';
+      const s = status.settings || {};
+      byId('summaryCamera').textContent = `${s.homekit_name || 'EZVIZ CB2'} · ${s.serial || '未填写'}`;
+      byId('summaryIp').textContent = s.camera_ip || '未填写';
+      byId('summaryTranscode').textContent = s.homekit_transcode === 'continuous' ? '持续转码' : '打开家庭时转码';
+      const running = bridge.state === 'running';
+      byId('finishTitle').textContent = running ? '桥接服务已启动' : '配置已经保存';
+      byId('finishMessage').textContent = bridge.message || '正在等待服务启动…';
+    }
+    async function refreshStatus() {
+      try {
+        const status = await api('/api/status');
+        updateStatus(status);
+        if (!initialized) {
+          fillSettings(status.settings || {});
+          initialized = true;
+          if (status.configured && status.authenticated) showStep(3);
+          if (!status.configured && !autoDiscoveryStarted) {
+            autoDiscoveryStarted = true;
+            setTimeout(discoverDevices, 350);
+          }
+        }
+      } catch (error) {
+        byId('statusText').textContent = '无法读取服务状态';
+      }
+    }
+    async function pollStatus() {
+      try {
+        if (!document.hidden) await refreshStatus();
+      } catch (error) {
+        console.debug('状态轮询失败', error);
+      } finally {
+        window.setTimeout(pollStatus, 3000);
+      }
+    }
+    function renderDevices(devices) {
+      const root = byId('deviceResults');
+      root.replaceChildren();
+      if (!devices.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = '没有发现设备。可唤醒摄像头后重试，或在下方手动填写 IP。';
+        root.append(empty);
+        return;
+      }
+      devices.forEach(device => {
+        const row = document.createElement('div');
+        row.className = `device${device.matches_hint ? ' match' : ''}`;
+        const info = document.createElement('div');
+        const title = document.createElement('div');
+        title.className = 'device-title';
+        title.textContent = `${device.model || device.description || 'EZVIZ / Hikvision 设备'} · ${device.ip}`;
+        const meta = document.createElement('div');
+        meta.className = 'device-meta';
+        meta.textContent = `序列号 ${device.serial}${device.new_direct_reverse ? ` · 本地反向直连 ${device.new_direct_reverse}` : ''}`;
+        info.append(title, meta);
+        const choose = document.createElement('button');
+        choose.className = 'button secondary';
+        choose.type = 'button';
+        choose.textContent = '选择';
+        choose.addEventListener('click', () => {
+          byId('serial').value = device.serial;
+          byId('cameraIp').value = device.ip;
+          toast('已填入摄像头信息');
+        });
+        row.append(info, choose);
+        root.append(row);
+      });
+    }
+    async function discoverDevices() {
+      const button = byId('discoverButton');
+      button.disabled = true;
+      button.textContent = '正在搜索…';
+      byId('discoverMessage').textContent = '正在向当前局域网发送 SADP 发现请求，约需 3 秒…';
+      try {
+        const value = await api('/api/discover', { serial_hint: byId('serial').value.trim() });
+        renderDevices(value.devices || []);
+        byId('discoverMessage').textContent = value.message;
+        const matches = (value.devices || []).filter(device => device.matches_hint);
+        if (matches.length === 1) {
+          byId('serial').value = matches[0].serial;
+          byId('cameraIp').value = matches[0].ip;
+          toast('已按序列号匹配到摄像头');
+        } else if ((value.devices || []).length === 1 && !byId('serial').value.trim()) {
+          byId('serial').value = value.devices[0].serial;
+          byId('cameraIp').value = value.devices[0].ip;
+          toast('已自动选择唯一设备');
+        }
+      } catch (error) {
+        showError(error.message);
+        byId('discoverMessage').textContent = '搜索未完成，可稍后重试或手动填写。';
+      } finally {
+        button.disabled = false;
+        button.textContent = '重新搜索';
+      }
+    }
+    function applyIdentified(value) {
+      const device = value.device || {};
+      if (device.serial) byId('serial').value = device.serial;
+      if (device.ip) byId('cameraIp').value = device.ip;
+      renderDevices(device.ip ? [device] : []);
+      byId('discoverMessage').textContent = value.message;
+      toast(value.message);
+      if (!device.ip) showError('已找到设备，但尚未取得 IP。请唤醒摄像头后点“重新搜索”，或手动填写路由器分配的地址。');
+    }
+    async function identifyFromCloud() {
+      const hint = byId('serial').value.trim();
+      if (hint.length < 4) { showError('请先输入序列号末 4 位以上'); return; }
+      const button = byId('identifyButton');
+      button.disabled = true;
+      button.textContent = '正在登录并识别…';
+      try {
+        const value = await api('/api/identify', {
+          serial_hint: hint,
+          account: byId('findAccount').value,
+          password: byId('findPassword').value,
+          region: byId('region').value.trim()
+        });
+        byId('findPassword').value = '';
+        if (value.state === 'sms_required') {
+          byId('findSmsArea').hidden = false;
+          byId('findSmsCode').focus();
+          toast(value.message);
+        } else {
+          applyIdentified(value);
+          await refreshStatus();
+        }
+      } catch (error) { byId('findPassword').value = ''; showError(error.message); }
+      finally { button.disabled = false; button.textContent = '登录萤石辅助查找'; }
+    }
+    async function identifyWithSms() {
+      const button = byId('findSmsButton');
+      button.disabled = true;
+      try {
+        const value = await api('/api/identify', { sms_code: byId('findSmsCode').value });
+        byId('findSmsCode').value = '';
+        byId('findSmsArea').hidden = true;
+        applyIdentified(value);
+        await refreshStatus();
+      } catch (error) { showError(error.message); }
+      finally { button.disabled = false; }
+    }
+    async function saveSettings() {
+      const button = byId('saveButton');
+      button.disabled = true;
+      try {
+        const value = await api('/api/settings', { settings: collectSettings() });
+        fillSettings(value.settings);
+        toast(value.message);
+        await refreshStatus();
+        showStep(2);
+      } catch (error) { showError(error.message); }
+      finally { button.disabled = false; }
+    }
+    async function login() {
+      const button = byId('loginButton');
+      button.disabled = true;
+      try {
+        const value = await api('/api/login', { account: byId('account').value, password: byId('password').value });
+        byId('password').value = '';
+        if (value.state === 'sms_required') {
+          byId('smsArea').hidden = false;
+          byId('smsCode').focus();
+          toast(value.message);
+        } else {
+          toast(value.message);
+          await refreshStatus();
+          showStep(3);
+        }
+      } catch (error) { byId('password').value = ''; showError(error.message); }
+      finally { button.disabled = false; }
+    }
+    async function verifySms() {
+      const button = byId('smsButton');
+      button.disabled = true;
+      try {
+        const value = await api('/api/login', { sms_code: byId('smsCode').value });
+        byId('smsCode').value = '';
+        byId('smsArea').hidden = true;
+        toast(value.message);
+        await refreshStatus();
+        showStep(3);
+      } catch (error) { showError(error.message); }
+      finally { button.disabled = false; }
+    }
+
+    document.querySelectorAll('[data-goto]').forEach(button => button.addEventListener('click', () => showStep(Number(button.dataset.goto))));
+    document.querySelectorAll('[data-next]').forEach(button => button.addEventListener('click', () => {
+      if (!byId('serial').value.trim() || !byId('cameraIp').value.trim()) { showError('请先选择摄像头，或填写完整序列号和 IP'); return; }
+      showStep(currentStep + 1);
+    }));
+    document.querySelectorAll('[data-back]').forEach(button => button.addEventListener('click', () => showStep(currentStep - 1)));
+    byId('discoverButton').addEventListener('click', discoverDevices);
+    byId('identifyButton').addEventListener('click', identifyFromCloud);
+    byId('findSmsButton').addEventListener('click', identifyWithSms);
+    byId('saveButton').addEventListener('click', saveSettings);
+    byId('loginButton').addEventListener('click', login);
+    byId('smsButton').addEventListener('click', verifySms);
+    byId('skipLogin').addEventListener('click', () => showStep(3));
+    pollStatus();
+  </script>
+</body>
+</html>
