@@ -348,6 +348,41 @@ def test_legacy_bind_migration_recovers_an_interrupted_copy(tmp_path: Path) -> N
     assert not marker.exists()
 
 
+def test_legacy_bind_migration_assigns_state_to_the_bridge_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "legacy"
+    source.mkdir()
+    (source / "go2rtc.yaml").write_text(_legacy_config())
+    target = tmp_path / "named-volume"
+    ownership: list[tuple[Path, int, int, bool]] = []
+
+    def record_chown(
+        path: Path,
+        uid: int,
+        gid: int,
+        *,
+        follow_symlinks: bool,
+    ) -> None:
+        if not path.exists():
+            raise FileNotFoundError(path)
+        ownership.append((path, uid, gid, follow_symlinks))
+
+    monkeypatch.setattr(config_tool.os, "chown", record_chown)
+
+    assert config_tool.migrate_legacy_bind_state(
+        source,
+        target,
+        "TESTCB2123456",
+        owner=(1000, 1001),
+    )
+    assert ownership == [
+        (target / "go2rtc.yaml", 1000, 1001, False),
+        (target, 1000, 1001, False),
+    ]
+    assert not (target / config_tool.LEGACY_MIGRATION_MARKER).exists()
+
+
 def test_read_homekit_pin_ignores_other_sections_and_indentation(
     tmp_path: Path,
 ) -> None:

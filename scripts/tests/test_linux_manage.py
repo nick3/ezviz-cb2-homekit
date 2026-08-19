@@ -41,6 +41,10 @@ def test_shell_setup_port_takes_precedence_over_dotenv(tmp_path: Path) -> None:
 def test_compose_preserves_the_old_bind_mount_for_automatic_migration() -> None:
     compose = COMPOSE.read_text()
 
-    assert "EZVIZ_LEGACY_DATA_DIR: /legacy-data" in compose
+    assert "migrate:" in compose
+    assert 'command: ["migrate-legacy"]' in compose
+    assert 'network_mode: "none"' in compose
+    assert "condition: service_completed_successfully" in compose
     assert "- ezviz-data:/data" in compose
     assert "- ./data:/legacy-data:ro" in compose
+    assert "- DAC_OVERRIDE" in compose

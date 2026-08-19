@@ -47,6 +47,16 @@ PIN_LINE = re.compile(
 SERIAL_PATTERN = re.compile(r"^[A-Za-z0-9_-]{7,64}$")
 
 
+def _numeric_id(value: str) -> int:
+    try:
+        result = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a numeric ID") from error
+    if not 0 <= result <= 2_147_483_647:
+        raise argparse.ArgumentTypeError("must be between 0 and 2147483647")
+    return result
+
+
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -68,6 +78,13 @@ def _arguments() -> argparse.Namespace:
     migrate.add_argument("--source-token", type=Path, required=True)
     migrate.add_argument("--target-config", type=Path, required=True)
     migrate.add_argument("--target-token", type=Path, required=True)
+
+    legacy = subparsers.add_parser("migrate-bind-state")
+    legacy.add_argument("--source-dir", type=Path, required=True)
+    legacy.add_argument("--target-dir", type=Path, required=True)
+    legacy.add_argument("--serial", default="")
+    legacy.add_argument("--uid", type=_numeric_id, required=True)
+    legacy.add_argument("--gid", type=_numeric_id, required=True)
 
     return parser.parse_args()
 
@@ -230,10 +247,28 @@ def _legacy_marker_payload(
     return json.dumps(value, sort_keys=True).encode("utf-8") + b"\n"
 
 
+def _set_migrated_state_owner(
+    target_dir: Path,
+    paths: tuple[Path, ...],
+    owner: tuple[int, int] | None,
+) -> None:
+    if owner is None:
+        return
+    uid, gid = owner
+    for path in paths:
+        try:
+            os.chown(path, uid, gid, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+    os.chown(target_dir, uid, gid, follow_symlinks=False)
+
+
 def migrate_legacy_bind_state(
     source_dir: Path,
     target_dir: Path,
     serial: str,
+    *,
+    owner: tuple[int, int] | None = None,
 ) -> bool:
     """Move the old ./data bind state into an empty named volume once.
 
@@ -250,6 +285,11 @@ def migrate_legacy_bind_state(
     if target_config.exists():
         if marker.exists():
             _regular_file(marker, "Legacy migration marker")
+            _set_migrated_state_owner(
+                target_dir,
+                (target_config, target_token, target_auth),
+                owner,
+            )
             marker.unlink()
         return False
 
@@ -358,6 +398,11 @@ def migrate_legacy_bind_state(
                     + b"\n",
                 )
         _secure_write(target_config, source_config)
+        _set_migrated_state_owner(
+            target_dir,
+            (target_config, target_token, target_auth),
+            owner,
+        )
         marker.unlink()
     except BaseException:
         target_config.unlink(missing_ok=True)
@@ -422,6 +467,14 @@ def main() -> int:
             _show_pin(args.config)
         elif args.command == "import-state":
             _import_state(args)
+        elif args.command == "migrate-bind-state":
+            if migrate_legacy_bind_state(
+                args.source_dir,
+                args.target_dir,
+                args.serial,
+                owner=(args.uid, args.gid),
+            ):
+                print("已从旧版绑定目录迁移 HomeKit 身份和萤石会话。")
         else:
             raise RuntimeError(f"Unsupported command: {args.command}")
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as error:

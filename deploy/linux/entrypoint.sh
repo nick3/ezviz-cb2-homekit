@@ -42,6 +42,14 @@ case "${command}" in
   start)
     exec python3 /app/deploy/linux/service_supervisor.py
     ;;
+  migrate-legacy)
+    exec python3 "${config_tool}" migrate-bind-state \
+      --source-dir "${EZVIZ_LEGACY_DATA_DIR:-/legacy-data}" \
+      --target-dir "${data_dir}" \
+      --serial "${EZVIZ_SERIAL:-}" \
+      --uid "${EZVIZ_RUNTIME_UID:-1000}" \
+      --gid "${EZVIZ_RUNTIME_GID:-1000}"
+    ;;
   login)
     initialize_config
     require_value EZVIZ_SERIAL

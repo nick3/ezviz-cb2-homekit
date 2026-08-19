@@ -1,6 +1,32 @@
 name: ezviz-homekit
 
 services:
+  migrate:
+    image: "${EZVIZ_HOMEKIT_IMAGE:-ghcr.io/nick3/ezviz-cb2-homekit:latest}"
+    pull_policy: "${EZVIZ_PULL_POLICY:-always}"
+    command: ["migrate-legacy"]
+    network_mode: "none"
+    restart: "no"
+    environment:
+      EZVIZ_DATA_DIR: /data
+      EZVIZ_LEGACY_DATA_DIR: /legacy-data
+      EZVIZ_SERIAL: "${EZVIZ_SERIAL:-}"
+      EZVIZ_RUNTIME_UID: "${PUID:-1000}"
+      EZVIZ_RUNTIME_GID: "${PGID:-1000}"
+    user: "0:0"
+    volumes:
+      - ezviz-data:/data
+      - ./data:/legacy-data:ro
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+
   bridge:
     image: "${EZVIZ_HOMEKIT_IMAGE:-ghcr.io/nick3/ezviz-cb2-homekit:latest}"
     pull_policy: "${EZVIZ_PULL_POLICY:-always}"
@@ -9,7 +35,6 @@ services:
     stop_grace_period: 15s
     environment:
       EZVIZ_DATA_DIR: /data
-      EZVIZ_LEGACY_DATA_DIR: /legacy-data
       EZVIZ_SETUP_HOST: "${EZVIZ_SETUP_HOST:-0.0.0.0}"
       EZVIZ_SETUP_PORT: "${EZVIZ_SETUP_PORT:-8099}"
       EZVIZ_SERIAL: "${EZVIZ_SERIAL:-}"
@@ -27,9 +52,11 @@ services:
       HOMEKIT_NAME: "${HOMEKIT_NAME:-}"
       TZ: "${TZ:-Asia/Shanghai}"
     user: "${PUID:-1000}:${PGID:-1000}"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - ezviz-data:/data
-      - ./data:/legacy-data:ro
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
