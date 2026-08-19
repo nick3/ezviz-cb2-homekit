@@ -8,8 +8,9 @@ import (
 )
 
 func (s *Stream) AddConsumer(cons core.Consumer) (err error) {
-	// support for multiple simultaneous pending from different consumers
-	consN := s.pending.Add(1) - 1
+	// Admit the reader and cancel linger under the same lock used by expiry.
+	// This makes the boundary either a completed stop or a retained producer.
+	consN := s.beginConsumerAdd()
 
 	var prodErrors = make([]error, len(s.producers))
 	var prodMedias []*core.Media
@@ -95,7 +96,11 @@ func (s *Stream) AddConsumer(cons core.Consumer) (err error) {
 
 	// stop producers if they don't have readers
 	if s.pending.Add(-1) == 0 {
-		s.stopProducers()
+		if len(prodStarts) == 0 {
+			s.scheduleStopProducers()
+		} else {
+			s.stopProducers()
+		}
 	}
 
 	if len(prodStarts) == 0 {

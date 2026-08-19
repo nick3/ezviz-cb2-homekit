@@ -5,6 +5,7 @@ deploy/linux/data/
 __pycache__/
 
 go2rtc.yaml
+go2rtc.yaml.pre-v*.bak
 go2rtc.json
 
 go2rtc_freebsd*

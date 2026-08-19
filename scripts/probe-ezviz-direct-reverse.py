@@ -27,6 +27,8 @@ PY_EZVIZ_DIR = PROJECT_DIR / ".tmp" / "pyEzvizApiCN"
 LEGACY_YS7_CAS_CERT_SHA256 = (
     "234e9cde3a0c2a77d93023f0e4611c10231877c77c007c4efb92ab2d15408424"
 )
+ACTIVITY_MARK_INTERVAL_SECONDS = 10.0
+ACTIVITY_MARKER_MAX_AGE_SECONDS = 30.0
 sys.path.insert(0, str(PY_EZVIZ_DIR))
 sys.path.insert(0, str(PROJECT_DIR / "scripts"))
 
@@ -125,6 +127,14 @@ def _arguments() -> argparse.Namespace:
         "--capture-file",
         type=Path,
         help="Optional 0600 file for the raw direct-reverse media connection",
+    )
+    parser.add_argument(
+        "--activity-file",
+        type=Path,
+        help=(
+            "Optional 0600 runtime marker used by the warm-stream controller; "
+            "it contains only this process ID and start time"
+        ),
     )
     return parser.parse_args()
 
@@ -283,6 +293,78 @@ def _open_capture(path: Path | None) -> Any | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     return os.fdopen(descriptor, "wb")
+
+
+def _mark_stream_active(path: Path | None, *, pid: int | None = None) -> bool:
+    if path is None:
+        return False
+    owner = os.getpid() if pid is None else pid
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{owner}.tmp")
+    payload = json.dumps(
+        {"pid": owner, "started_at": int(time.time())},
+        separators=(",", ":"),
+    ).encode("ascii")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return True
+
+
+def _activity_marker_owned(
+    path: Path | None,
+    *,
+    pid: int | None = None,
+    now: float | None = None,
+) -> bool:
+    if path is None:
+        return False
+    owner = os.getpid() if pid is None else pid
+    try:
+        current = time.time() if now is None else now
+        if abs(current - path.stat().st_mtime) > ACTIVITY_MARKER_MAX_AGE_SECONDS:
+            return False
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return isinstance(value, dict) and value.get("pid") == owner
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
+def _refresh_stream_active(path: Path | None, *, pid: int | None = None) -> bool:
+    if _activity_marker_owned(path, pid=pid):
+        assert path is not None
+        try:
+            refreshed_at = time.time()
+            os.utime(path, (refreshed_at, refreshed_at))
+            if _activity_marker_owned(path, pid=pid, now=refreshed_at):
+                return True
+        except OSError:
+            pass
+    return _mark_stream_active(path, pid=pid)
+
+
+def _clear_stream_active(path: Path | None, *, pid: int | None = None) -> None:
+    if path is None:
+        return
+    owner = os.getpid() if pid is None else pid
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(value, dict) and value.get("pid") == owner:
+            path.unlink(missing_ok=True)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return
 
 
 def _handle_callback_connection(
@@ -545,6 +627,8 @@ def main() -> int:
     output_status = 0
     output_bytes = 0
     output_broken = False
+    activity_marked = False
+    next_activity_mark = 0.0
     try:
         with media_connection:
             media_connection.settimeout(0.5)
@@ -563,6 +647,15 @@ def main() -> int:
                 now = time.monotonic()
                 first_data_at = first_data_at or now
                 last_data_at = now
+                if args.activity_file is not None and now >= next_activity_mark:
+                    next_activity_mark = now + ACTIVITY_MARK_INTERVAL_SECONDS
+                    try:
+                        activity_marked = (
+                            _refresh_stream_active(args.activity_file)
+                            or activity_marked
+                        )
+                    except OSError as err:
+                        _report(f"媒体活动标记写入失败：{err}。")
                 total_bytes += len(chunk)
                 if len(sample) < 1024 * 1024:
                     sample.extend(chunk[: 1024 * 1024 - len(sample)])
@@ -581,6 +674,8 @@ def main() -> int:
                     output_broken = True
                     break
     finally:
+        if activity_marked:
+            _clear_stream_active(args.activity_file)
         if capture is not None:
             capture.close()
         if not output_broken:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,15 @@ import sys
 
 
 PIN_MARKER = "__HOMEKIT_PIN__"
+CONFIG_VERSION = 3
+CONFIG_VERSION_LINE = f"# ezviz-cb2-config-version: {CONFIG_VERSION}"
+CURRENT_CONFIG_MARKERS = (
+    CONFIG_VERSION_LINE,
+    "linger:",
+    "ezviz_raw:",
+    "--activity-file=",
+    "ffmpeg:ezviz_raw#",
+)
 INSECURE_PINS = {
     "00000000",
     "11111111",
@@ -39,6 +49,10 @@ def _arguments() -> argparse.Namespace:
     init = subparsers.add_parser("init")
     init.add_argument("--template", type=Path, required=True)
     init.add_argument("--target", type=Path, required=True)
+
+    upgrade = subparsers.add_parser("upgrade")
+    upgrade.add_argument("--template", type=Path, required=True)
+    upgrade.add_argument("--target", type=Path, required=True)
 
     show_pin = subparsers.add_parser("show-pin")
     show_pin.add_argument("--config", type=Path, required=True)
@@ -84,6 +98,27 @@ def _secure_write(path: Path, data: bytes) -> None:
         raise
 
 
+def _secure_backup(target: Path, data: bytes) -> Path:
+    backup = target.with_name(f"{target.name}.pre-v{CONFIG_VERSION}.bak")
+    if backup.exists():
+        backup.chmod(0o600)
+        if backup.read_bytes() == data:
+            return backup
+        digest = hashlib.sha256(data).hexdigest()[:16]
+        backup = target.with_name(
+            f"{target.name}.pre-v{CONFIG_VERSION}.{digest}.bak"
+        )
+        if backup.exists():
+            backup.chmod(0o600)
+            if backup.read_bytes() != data:
+                raise RuntimeError(
+                    "Config backup hash collision; refusing to overwrite it"
+                )
+            return backup
+    _secure_write(backup, data)
+    return backup
+
+
 def _render_new_config(template: Path) -> str:
     text = template.read_text(encoding="utf-8")
     if text.count(PIN_MARKER) != 1:
@@ -125,6 +160,23 @@ def _init(template: Path, target: Path) -> None:
     _secure_write(target, _render_new_config(template).encode())
 
 
+def _upgrade(template: Path, target: Path) -> bool:
+    """Upgrade a managed config while preserving its HomeKit identity."""
+    source_config = target.read_text(encoding="utf-8")
+    if all(marker in source_config for marker in CURRENT_CONFIG_MARKERS):
+        return False
+
+    homekit = _section(source_config, "homekit")
+    if PIN_LINE.search(homekit) is None:
+        raise RuntimeError("Existing config does not contain a HomeKit PIN")
+
+    migrated = _render_new_config(template)
+    migrated = _replace_section(migrated, "homekit", homekit)
+    _secure_backup(target, source_config.encode())
+    _secure_write(target, migrated.encode())
+    return True
+
+
 def _show_pin(config: Path) -> None:
     match = PIN_LINE.search(config.read_text(encoding="utf-8"))
     if match is None:
@@ -159,6 +211,9 @@ def main() -> int:
     try:
         if args.command == "init":
             _init(args.template, args.target)
+        elif args.command == "upgrade":
+            if _upgrade(args.template, args.target):
+                print(f"配置已升级到版本 {CONFIG_VERSION}；旧配置已安全备份。")
         elif args.command == "show-pin":
             _show_pin(args.config)
         elif args.command == "import-state":
