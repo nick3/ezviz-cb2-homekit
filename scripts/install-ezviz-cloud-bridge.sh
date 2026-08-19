@@ -97,7 +97,11 @@ fi
   "$project_dir/scripts/tests/test_ezviz_network_lock.py" \
   "$project_dir/scripts/tests/test_ezviz_warm_controller.py" \
   "$project_dir/scripts/tests/test_macos_config_migration.py" \
-  "$project_dir/scripts/tests/test_linux_config_tool.py"
+  "$project_dir/scripts/tests/test_linux_config_tool.py" \
+  "$project_dir/scripts/tests/test_linux_runtime_settings.py" \
+  "$project_dir/scripts/tests/test_ezviz_discovery.py" \
+  "$project_dir/scripts/tests/test_linux_setup_wizard.py" \
+  "$project_dir/scripts/tests/test_linux_service_supervisor.py"
 
 (
   cd "$project_dir"

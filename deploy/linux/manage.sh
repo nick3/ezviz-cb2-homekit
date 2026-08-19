@@ -10,11 +10,11 @@ usage() {
   cat <<'EOF'
 用法：./manage.sh <命令>
 
-  init                         创建 .env 和私有状态目录
+  init                         拉取镜像并启动 Web 配置向导
   bundle [输出文件]            生成可复制到 Linux 的无凭据源码包
-  build                        构建本机镜像
-  login                        交互登录萤石并保存会话令牌
-  up                           构建并后台启动桥接
+  pull                         拉取最新的预构建多架构镜像
+  login                        显示 Web 登录向导说明
+  up                           拉取镜像并后台启动向导/桥接
   verify                       主动唤醒摄像头并验证 H.264/Opus
   pin                          显示 HomeKit 配对码
   status                       查看容器状态
@@ -38,18 +38,7 @@ require_docker() {
 
 compose() {
   require_docker
-  PUID="${PUID:-$(id -u)}" PGID="${PGID:-$(id -g)}" \
-    docker compose --project-directory "${script_dir}" -f compose.yaml "$@"
-}
-
-ensure_layout() {
-  if [ ! -f .env ]; then
-    cp .env.example .env
-    chmod 600 .env
-    echo "已创建 deploy/linux/.env，请先填写摄像头和虚拟机地址。"
-  fi
-  mkdir -p data
-  chmod 700 data
+  docker compose --project-directory "${script_dir}" -f compose.yaml "$@"
 }
 
 absolute_file() {
@@ -65,7 +54,12 @@ absolute_file() {
 command=${1:-help}
 case "${command}" in
   init)
-    ensure_layout
+    if [ "$(uname -s)" != "Linux" ]; then
+      echo "正式启动需要 Linux 主机。" >&2
+      exit 1
+    fi
+    compose up -d
+    echo "Web 配置向导已启动，请在浏览器访问 http://<Linux-IP>:${EZVIZ_SETUP_PORT:-8099}。"
     ;;
   bundle)
     if [ "$#" -gt 2 ]; then
@@ -78,44 +72,37 @@ case "${command}" in
       "${script_dir}/make-bundle.sh"
     fi
     ;;
-  build)
-    ensure_layout
-    compose build
+  pull)
+    compose pull bridge
     ;;
   login)
-    ensure_layout
-    compose run --rm --no-deps --build bridge login
+    echo "请在浏览器访问 http://<Linux-IP>:${EZVIZ_SETUP_PORT:-8099}，通过向导登录萤石。"
     ;;
   up)
-    ensure_layout
     if [ "$(uname -s)" != "Linux" ]; then
       echo "正式启动需要 Linux 主机；macOS Docker Desktop 只能用于构建检查。" >&2
       exit 1
     fi
-    compose up -d --build
+    compose up -d
+    echo "Web 配置向导：http://<Linux-IP>:${EZVIZ_SETUP_PORT:-8099}"
     ;;
   verify)
-    ensure_layout
-    compose run --rm --no-deps bridge verify
+    compose exec bridge python3 /app/deploy/linux/verify.py
     ;;
   pin)
-    ensure_layout
-    compose run --rm --no-deps --build bridge show-pin
+    compose exec bridge python3 /app/deploy/linux/config_tool.py \
+      show-pin --config /data/go2rtc.yaml
     ;;
   status)
-    ensure_layout
     compose ps
     ;;
   logs)
-    ensure_layout
     compose logs -f bridge
     ;;
   restart)
-    ensure_layout
     compose restart bridge
     ;;
   down)
-    ensure_layout
     compose down
     ;;
   import-state)
@@ -123,14 +110,13 @@ case "${command}" in
       usage >&2
       exit 1
     fi
-    ensure_layout
     source_config=$(absolute_file "$2")
     source_token=$(absolute_file "$3")
-    compose run --rm --no-deps --build \
+    compose run --rm --no-deps \
       -v "${source_config}:/import/go2rtc.yaml:ro" \
       -v "${source_token}:/import/ezviz_token.json:ro" \
       bridge import-state
-    echo "已导入 HomeKit 配对身份和萤石会话；请继续填写 .env 后启动。"
+    echo "已导入 HomeKit 配对身份和萤石会话；请执行 docker compose up -d 后打开 Web 向导。"
     ;;
   help|-h|--help)
     usage

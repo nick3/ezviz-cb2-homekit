@@ -12,8 +12,9 @@ VTM/VTDU 云节点，也不读取 Mac 或 iPhone 上显示的画面。
    防火墙规则以及 mDNS 反射。
 3. 为摄像头和虚拟机设置 DHCP 地址保留。
 4. 从摄像头地址放行 TCP `39000`；从可信家庭网络放行 TCP `1984`、
-   UDP `8443` 和 mDNS UDP `5353`。RTSP `8554` 只监听容器本机。虚拟机
-   还需出站访问萤石 HTTPS 控制接口。启用 PIR 提前预热时建议允许出站
+   TCP `8099`、UDP `8443` 和 mDNS UDP `5353`。RTSP `8554` 只监听容器
+   本机。虚拟机还需出站访问萤石 HTTPS 控制接口。启用 PIR 提前预热时
+   建议允许出站
    TCP `1882` 连接萤石告警推送服务；推送注册不可用时会自动改走 HTTPS
    告警轮询。
 5. Docker 使用 host network，因为摄像头反向连接、HomeKit mDNS 和 SRTP
@@ -22,18 +23,53 @@ VTM/VTDU 云节点，也不读取 Mac 或 iPhone 上显示的画面。
 host network 会让容器共享宿主机网络栈，因此建议放在专用、可信的家庭
 Linux 虚拟机上。本配置同时使用非 root UID、只读根文件系统、删除全部
 Linux capabilities 和 `no-new-privileges`，但这些措施不能把 host network
-重新变成隔离网络。
+重新变成隔离网络。Web 向导会短暂接收萤石账号和密码，因此不要把 `8099`
+映射到公网，也不要在不可信网络中使用该页面；账号、密码和短信验证码只
+保存在请求处理内存中，不会写入状态卷。
 
 ## 首次部署
 
-需要 Docker Engine 和 Docker Compose 插件。进入本目录后运行：
+需要 Docker Engine 和 Docker Compose 插件。把 `compose.yaml` 放到 Linux
+服务器的空目录中，然后直接运行：
 
-项目在每次推送 `main` 或 `v*` 标签时通过 GitHub Actions 构建
-`linux/amd64` 与 `linux/arm64` 镜像。GHCR 地址固定为：
+```bash
+docker compose up -d
+```
+
+Compose 默认拉取以下预构建镜像，不需要下载源码或在服务器上编译：
 
 ```text
 ghcr.io/nick3/ezviz-cb2-homekit:latest
 ```
+
+要让全新服务器无需 `docker login` 即可执行这条命令，GHCR 容器包必须设为
+`Public`。GitHub 不允许公开后的容器包再改回私有，因此该可见性需要由仓库
+所有者在 Package settings 中明确确认；包仍为私有时需先登录 GHCR。
+
+镜像同时支持 `linux/amd64` 与 `linux/arm64`。启动后打开：
+
+```text
+http://<Linux 服务器局域网 IP>:8099
+```
+
+Web 向导会依次完成：
+
+1. 通过 SADP `inquiry` / `inquiry_v32` 在当前 VLAN 自动搜索萤石/Hikvision
+   设备，按完整序列号或末尾字符匹配，并自动填入摄像头 IP；搜索不到时仍
+   可手动填写。该过程只发送设备发现报文，不逐个扫描局域网端口。电池
+   摄像头休眠、不回应 SADP 时，可使用同页“登录萤石辅助查找”：向导先按
+   序列号后缀定位账号中的设备，再读取 `WIFI.address` / `CONNECTION.localIp`；
+   元数据没有地址时会发送一次官方唤醒控制并重试局域网发现。
+2. 配置电源识别、10 分钟保温、PIR 提前预热以及按需/持续转码策略。
+3. 登录萤石并处理可能出现的短信验证码。只有权限为 `0600` 的会话令牌
+   会写入 Docker 状态卷。
+4. 自动启动 go2rtc，并显示 HomeKit 配对码。
+
+保存设置或重新登录后，桥接进程会自动重载，不需要再次运行 Compose 命令。
+首次配置完成前容器也会保持运行并呈现健康状态，因为此时 Web 向导就是
+预期服务。
+
+项目在每次推送 `main` 或 `v*` 标签时通过 GitHub Actions 构建镜像。
 
 若仓库已配置 Docker Hub 发布凭据，同一份多架构镜像也会同步到：
 
@@ -41,16 +77,17 @@ ghcr.io/nick3/ezviz-cb2-homekit:latest
 <Docker Hub 用户名>/ezviz-cb2-homekit:latest
 ```
 
-默认 Compose 配置继续使用本机源码构建，便于审查和修改。若要在 Linux
-直接使用预编译镜像，将 `compose.yaml` 中 `image` 改成上述可访问地址并
-删除 `build` 段，然后照常执行后续命令。私有 GHCR 镜像需要先登录 GHCR。
+若需要固定版本或改用私有镜像，可在同目录 `.env` 中设置
+`EZVIZ_HOMEKIT_IMAGE`。正常部署不需要创建或编辑 `.env`。GHCR 仓库若被
+改为私有，需先用具备 `read:packages` 权限的令牌登录 GHCR。
 
 Docker Hub 首次接入不应把密码或令牌发到聊天或写入文件。在仓库根目录
 运行 `./scripts/configure-dockerhub-publish.sh`，按提示输入 Docker Hub
 用户名和带 Read & Write 权限的访问令牌；脚本会直接写入 GitHub Actions
 变量/密钥并重新触发发布。
 
-可以先在当前 Mac 工作区生成一个不含任何设备状态或凭据的迁移包：
+只有需要审查源码或本地构建镜像时，才需要在当前 Mac 工作区生成无凭据
+源码包：
 
 ```bash
 ./deploy/linux/manage.sh bundle /目标路径/ezviz-homekit-linux-src.tar.gz
@@ -61,40 +98,30 @@ HomeKit 配对和当前设备配置都不会进入这个压缩包；需要保留
 单独安全传输两个状态文件。脚本还会生成同名 `.sha256` 文件，复制后可用
 `sha256sum -c` 检查传输完整性。
 
-随后运行：
-
-```bash
-./manage.sh init
-```
-
-编辑 `.env`，填写完整摄像头序列号、摄像头固定 IP 和虚拟机 LAN IP。
-默认使用 CPU 软件编码，在没有 GPU 的虚拟机中也可运行。
-
-首次构建会从固定提交下载 pyEzvizApiCN，并使用本目录锁定的 Python 依赖
-版本。原生架构构建还会在镜像内以非 root 用户实际执行一次 seccomp 自检；
+本地构建会从固定提交下载 pyEzvizApiCN，并使用本目录锁定的 Python 依赖
+版本。原生架构构建还会在镜像内实际执行一次 seccomp 自检；
 已有摄像头 socket 必须继续可用，而创建新 socket 必须被内核拒绝，否则
 镜像构建直接失败。
 
 ```bash
-./manage.sh login
-./manage.sh up
-./manage.sh verify
-./manage.sh pin
+docker build -t ezviz-homekit:local -f deploy/linux/Dockerfile .
+EZVIZ_HOMEKIT_IMAGE=ezviz-homekit:local EZVIZ_PULL_POLICY=never \
+  docker compose -f deploy/linux/compose.yaml up -d
 ```
 
-`login` 会交互询问账号、密码和可能出现的短信验证码。账号、密码与验证码
-不会保存；只有权限为 `0600` 的会话令牌会写入 `data/`。`verify` 会主动
-取流并可能唤醒电池摄像头；容器自身的周期健康检查只检查本地端口。启用
+`./manage.sh verify` 会主动取流并可能唤醒电池摄像头；容器自身的周期健康
+检查只读取监督器状态，不会连接或唤醒摄像头。启用
 PIR 预热后，匹配本机序列号的移动/人体告警也会触发一次限时取流。
 
 升级已有部署时，启动入口会检查持久化配置版本。旧版受管配置会自动换成
 当前模板，同时保留完整 `homekit` 段、配对身份和配对列表；原文件会以权限
-`0600` 备份为 `data/go2rtc.yaml.pre-v3.bak`。该备份同样包含 HomeKit 状态，
-不得提交到 Git 或通过不安全渠道传输。若固定备份与当前待迁移配置不同，
+`0600` 备份为状态卷中的 `go2rtc.yaml.pre-v3.bak`。该备份同样包含
+HomeKit 状态，不得提交到 Git 或通过不安全渠道传输。若固定备份与当前
+待迁移配置不同，
 入口会保留两者，并为当前配置另建带内容哈希后缀的 `0600` 备份。
 
-在 Apple“家庭”中选择“添加配件 → 更多选项 → EZVIZ CB2”，输入 `pin`
-命令显示的配对码。常用维护命令：
+在 Apple“家庭”中选择“添加配件 → 更多选项 → EZVIZ CB2”，输入 Web 向导
+显示的配对码。常用维护命令：
 
 ```bash
 ./manage.sh status
@@ -103,8 +130,8 @@ PIR 预热后，匹配本机序列号的移动/人体告警也会触发一次限
 ./manage.sh down
 ```
 
-如果日志提示设备元数据没有 CAS 地址，先重新运行 `./manage.sh login`，再
-执行 `./manage.sh restart`。这通常表示萤石会话已过期或该次官方接口没有
+如果日志提示设备元数据没有 CAS 地址，先在 Web 向导中重新登录萤石。向导
+保存新会话后会自动重启桥接。这通常表示萤石会话已过期或该次官方接口没有
 返回完整设备元数据，不会触发云媒体回退。
 
 ## 自适应预热策略
@@ -126,7 +153,8 @@ PIR 预热后，匹配本机序列号的移动/人体告警也会触发一次限
 - 保活请求只会在局域网媒体源进程确实存在时续期。休眠状态没有定时空转
   唤醒，也没有云媒体备用源。
 
-`.env` 中可调整以下配置：
+这些配置可直接在 Web 向导中调整。旧版 `.env` 部署首次启动时会自动导入
+以下同名环境变量，之后以状态卷中的 Web 配置为准：
 
 ```dotenv
 EZVIZ_POWER_MODE=auto          # auto、mains 或 battery
@@ -147,7 +175,7 @@ EZVIZ_POWER_REFRESH_SECONDS=300 # 不小于 30 秒
 
 ## 从当前 Mac 迁移
 
-在新 Linux 主机首次执行 `login` 或 `up` 之前，把 Mac 上的 `go2rtc.yaml`
+在新 Linux 主机首次执行 `docker compose up -d` 之前，把 Mac 上的 `go2rtc.yaml`
 和 `.tmp/ezviz_token.json` 安全复制到临时目录，然后运行：
 
 ```bash
@@ -155,9 +183,10 @@ chmod 600 /安全路径/ezviz_token.json
 ./manage.sh import-state /安全路径/go2rtc.yaml /安全路径/ezviz_token.json
 ```
 
-导入器只保留旧配置的 `homekit` 段，并将它放入新的 Linux 配置，因此会
-保留配对码、配件身份和 Apple Home 配对列表，但不会带入 Mac 路径、旧 IP
-或 VideoToolbox 设置。目标 `data/` 已有状态时它会拒绝覆盖。
+该迁移命令需要源码包中的 `manage.sh`。导入器只保留旧配置的 `homekit`
+段，并将它放入新的 Linux 配置，因此会保留配对码、配件身份和 Apple Home
+配对列表，但不会带入 Mac 路径、旧 IP 或 VideoToolbox 设置。目标状态卷
+已有状态时它会拒绝覆盖。
 
 ## 编码器
 
@@ -177,8 +206,9 @@ chmod 600 /安全路径/ezviz_token.json
   Python 源进程会先确认自己只剩摄像头媒体 socket，再加载 seccomp 规则。
 - seccomp 同步应用到该进程的全部线程，并由后续 FFmpeg 子进程继承；规则
   拒绝新的 `socket()` 和 `connect()`，已有摄像头 TCP 流仍可继续读取。
-- `data/go2rtc.yaml` 含 HomeKit 配对信息，`data/ezviz_token.json` 含萤石
-  会话。整个 `data/` 必须按密钥材料备份和传输，不要提交到 Git。
+- Docker 命名卷 `ezviz-homekit_ezviz-data` 中的 `go2rtc.yaml` 含 HomeKit
+  配对信息，`ezviz_token.json` 含萤石会话，`settings.json` 含非密码运行
+  参数。整个状态卷必须按密钥材料备份和传输，不要提交到 Git。
 - 常电策略启动并完成首次取流后，后续查看通常无需再次唤醒。纯电池模式在
   10 分钟保温或 PIR 预热窗口内也可直接复用现有流；窗口到期后的下一次查看
   仍是冷启动，通常需要十几秒。保温和事件预热都会增加耗电。

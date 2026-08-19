@@ -2,20 +2,31 @@ name: ezviz-homekit
 
 services:
   bridge:
-    image: ezviz-homekit:local
-    build:
-      context: ../..
-      dockerfile: deploy/linux/Dockerfile
+    image: "${EZVIZ_HOMEKIT_IMAGE:-ghcr.io/nick3/ezviz-cb2-homekit:latest}"
+    pull_policy: "${EZVIZ_PULL_POLICY:-always}"
     network_mode: host
     restart: unless-stopped
     stop_grace_period: 15s
-    env_file:
-      - .env
     environment:
       EZVIZ_DATA_DIR: /data
+      EZVIZ_SETUP_PORT: "${EZVIZ_SETUP_PORT:-8099}"
+      EZVIZ_SERIAL: "${EZVIZ_SERIAL:-}"
+      EZVIZ_CAMERA_IP: "${EZVIZ_CAMERA_IP:-}"
+      EZVIZ_LISTEN_IP: "${EZVIZ_LISTEN_IP:-}"
+      EZVIZ_CALLBACK_PORT: "${EZVIZ_CALLBACK_PORT:-}"
+      EZVIZ_ENCODER: "${EZVIZ_ENCODER:-}"
+      EZVIZ_POWER_MODE: "${EZVIZ_POWER_MODE:-}"
+      EZVIZ_HOMEKIT_TRANSCODE: "${EZVIZ_HOMEKIT_TRANSCODE:-}"
+      EZVIZ_WARM_SECONDS: "${EZVIZ_WARM_SECONDS:-}"
+      EZVIZ_PIR_PREHEAT: "${EZVIZ_PIR_PREHEAT:-}"
+      EZVIZ_PIR_POLL_SECONDS: "${EZVIZ_PIR_POLL_SECONDS:-}"
+      EZVIZ_POWER_REFRESH_SECONDS: "${EZVIZ_POWER_REFRESH_SECONDS:-}"
+      EZVIZ_REGION: "${EZVIZ_REGION:-}"
+      HOMEKIT_NAME: "${HOMEKIT_NAME:-}"
+      TZ: "${TZ:-Asia/Shanghai}"
     user: "${PUID:-1000}:${PGID:-1000}"
     volumes:
-      - ./data:/data
+      - ezviz-data:/data
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
@@ -28,4 +39,7 @@ services:
       interval: 30s
       timeout: 3s
       retries: 3
-      start_period: 10s
+      start_period: 20s
+
+volumes:
+  ezviz-data:

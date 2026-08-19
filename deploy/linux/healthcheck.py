@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
-"""Check only local listeners; never wake the battery camera."""
+"""Check the supervisor without waking the battery camera."""
 
 from __future__ import annotations
 
-import socket
+import json
+from http.client import HTTPConnection, HTTPException
+import os
 
 
-for port in (1984, 8554):
-    with socket.create_connection(("127.0.0.1", port), timeout=1):
-        pass
+port = int(os.environ.get("EZVIZ_SETUP_PORT", "8099"))
+connection = HTTPConnection("127.0.0.1", port, timeout=2)
+try:
+    connection.request("GET", "/api/health")
+    response = connection.getresponse()
+    value = json.load(response)
+    if response.status != 200 or value.get("healthy") is not True:
+        raise SystemExit(1)
+except (HTTPException, OSError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1) from None
+finally:
+    connection.close()
