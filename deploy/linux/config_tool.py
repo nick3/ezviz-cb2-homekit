@@ -39,7 +39,10 @@ INSECURE_PINS = {
     "87654321",
 }
 TOP_LEVEL_SECTION = re.compile(r"(?m)^(?P<name>[A-Za-z0-9_-]+):(?:[ \t].*)?$")
-PIN_LINE = re.compile(r"(?m)^[ \t]+pin:[ \t]*[\"']?([0-9-]{8,10})[\"']?[ \t]*(?:#.*)?$")
+PIN_LINE = re.compile(
+    r"(?m)^[ \t]+pin:[ \t]*(?P<quote>[\"']?)"
+    r"(?P<pin>[0-9]{3}-[0-9]{2}-[0-9]{3})(?P=quote)[ \t]*(?:#.*)?$"
+)
 
 
 def _arguments() -> argparse.Namespace:
@@ -156,7 +159,10 @@ def _homekit_pin(homekit: str) -> str:
     match = PIN_LINE.search(homekit)
     if match is None:
         raise RuntimeError("HomeKit PIN was not found in the persistent config")
-    return match.group(1)
+    pin = match.group("pin")
+    if pin.replace("-", "") in INSECURE_PINS:
+        raise RuntimeError("HomeKit PIN is insecure")
+    return pin
 
 
 def read_homekit_pin(config: Path) -> str:

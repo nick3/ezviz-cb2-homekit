@@ -77,7 +77,8 @@ case "${command}" in
       exit 1
     fi
     compose up -d
-    echo "Web 配置向导：http://<Linux-IP>:$(setup_port)"
+    echo "Web 配置向导：https://<Linux-IP>:$(setup_port)"
+    echo "首次访问前请用 docker compose logs bridge 核对 TLS 证书 SHA-256 指纹。"
     ;;
   bundle)
     if [ "$#" -gt 2 ]; then
@@ -94,7 +95,8 @@ case "${command}" in
     compose pull bridge
     ;;
   login)
-    echo "请在浏览器访问 http://<Linux-IP>:$(setup_port)，通过向导登录萤石。"
+    echo "请在浏览器访问 https://<Linux-IP>:$(setup_port)，通过向导登录萤石。"
+    echo "提交账号前请用 docker compose logs bridge 核对 TLS 证书 SHA-256 指纹。"
     ;;
   verify)
     compose exec bridge python3 /app/deploy/linux/verify.py

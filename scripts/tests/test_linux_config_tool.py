@@ -197,3 +197,17 @@ log:
     )
 
     assert config_tool.read_homekit_pin(config) == "321-54-678"
+
+
+@pytest.mark.parametrize(
+    "pin",
+    ["1234567890", "1-2345678", "111-11-111", "\"321-54-678'"],
+)
+def test_read_homekit_pin_rejects_malformed_or_insecure_values(
+    tmp_path: Path, pin: str
+) -> None:
+    config = tmp_path / "go2rtc.yaml"
+    config.write_text(f"homekit:\n  ezviz:\n    pin: {pin}\n")
+
+    with pytest.raises(RuntimeError, match="PIN"):
+        config_tool.read_homekit_pin(config)

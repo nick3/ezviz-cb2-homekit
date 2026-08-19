@@ -218,6 +218,15 @@ def token_matches_serial(path: Path, serial: str) -> bool:
     return bool(bound_serial) and bound_serial == expected_serial
 
 
+def _serialize_settings(settings: Mapping[str, Any]) -> bytes:
+    return (
+        json.dumps(settings, ensure_ascii=False, indent=2, sort_keys=True).encode(
+            "utf-8"
+        )
+        + b"\n"
+    )
+
+
 def secure_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.parent.chmod(0o700)
@@ -285,16 +294,7 @@ class SettingsStore:
     def save(self, value: Mapping[str, Any]) -> dict[str, Any]:
         with self._lock:
             normalized = normalize_settings(value, require_complete=True)
-            payload = (
-                json.dumps(
-                    normalized,
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                ).encode("utf-8")
-                + b"\n"
-            )
-            secure_write(self.path, payload)
+            secure_write(self.path, _serialize_settings(normalized))
             return normalized
 
     def bootstrap_from_environment(
@@ -322,16 +322,7 @@ class SettingsStore:
                     flush=True,
                 )
                 return False
-            payload = (
-                json.dumps(
-                    normalized,
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                ).encode("utf-8")
-                + b"\n"
-            )
-            secure_write(self.path, payload)
+            secure_write(self.path, _serialize_settings(normalized))
             return True
 
 

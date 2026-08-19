@@ -6,6 +6,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import secrets
+import ssl
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -29,6 +30,7 @@ from runtime_settings import (
 
 MAX_REQUEST_BYTES = 64 * 1024
 PENDING_LOGIN_SECONDS = 300
+DEFAULT_SETUP_HOST = "0.0.0.0"  # noqa: S104 - HTTPS plus a LAN allowlist is intentional.
 TRUSTED_IPV4_NETWORKS = tuple(
     ipaddress.ip_network(value)
     for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10")
@@ -106,23 +108,28 @@ class LoginCoordinator:
         self._pending = None
         try:
             client.close_session()
-        except BaseException:
+        except BaseException:  # noqa: S110 - session cleanup is best effort
             pass
 
     def _save_token(self, client: Any, serial: str) -> None:
         token = client.export_token()
         if not isinstance(token, dict) or not token.get("session_id"):
             raise WizardError("萤石登录成功，但返回的会话令牌无效")
+        auth_state = self.token_file.with_name(AUTH_STATE_FILE_NAME)
         secure_write(
-            self.token_file.with_name(AUTH_STATE_FILE_NAME),
-            json.dumps({"serial": serial.upper()}, ensure_ascii=False, indent=2).encode(
-                "utf-8"
-            )
-            + b"\n",
+            auth_state,
+            b'{"state":"updating","serial":""}\n',
         )
         secure_write(
             self.token_file,
             json.dumps(token, ensure_ascii=False, indent=2).encode("utf-8") + b"\n",
+        )
+        secure_write(
+            auth_state,
+            json.dumps({"serial": serial.upper()}, ensure_ascii=False, indent=2).encode(
+                "utf-8"
+            )
+            + b"\n",
         )
         self.reload_callback()
 
@@ -166,7 +173,7 @@ class LoginCoordinator:
         if not camera_ip:
             try:
                 client.delay_battery_device_sleep(serial, 1, 1, max_retries=0)
-            except BaseException:
+            except BaseException:  # noqa: S110 - wake-up is an optional hint
                 pass
             try:
                 local_devices = self.discover(timeout=4.0, serial_hint=serial)
@@ -277,14 +284,20 @@ class LoginCoordinator:
             _, verification_error, api_error = self._dependencies()
             try:
                 client.login(sms_code=int(code))
-                result = self._complete(client, context)
             except verification_error as error:
                 raise WizardError("短信验证码未通过验证") from error
             except api_error as error:
                 self._close_pending()
                 raise WizardError(f"萤石登录失败：{error}") from error
-            self._close_pending()
-            return result
+            except BaseException:
+                self._close_pending()
+                raise
+            try:
+                return self._complete(client, context)
+            except api_error as error:
+                raise WizardError(f"萤石设备验证失败：{error}") from error
+            finally:
+                self._close_pending()
 
     def close(self) -> None:
         with self._lock:
@@ -553,19 +566,39 @@ def create_server(
     application: WizardApplication,
     host: str,
     port: int,
+    *,
+    certificate: Path,
+    private_key: Path,
 ) -> ThreadingHTTPServer:
-    return ReusableThreadingHTTPServer((host, port), _handler(application))
+    server = ReusableThreadingHTTPServer((host, port), _handler(application))
+    try:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(str(certificate), str(private_key))
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+    except BaseException:
+        server.server_close()
+        raise
+    return server
 
 
 def serve(
     application: WizardApplication,
     *,
-    host: str = "0.0.0.0",
+    certificate: Path,
+    private_key: Path,
+    host: str = DEFAULT_SETUP_HOST,
     port: int = 8099,
 ) -> None:
     # The handler still enforces a local/private source-address allowlist when
     # listening on every interface for convenient first-run LAN access.
-    server = create_server(application, host, port)
+    server = create_server(
+        application,
+        host,
+        port,
+        certificate=certificate,
+        private_key=private_key,
+    )
     try:
         server.serve_forever(poll_interval=0.5)
     finally:

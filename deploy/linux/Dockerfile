@@ -43,7 +43,7 @@ RUN for patch_file in /patches/*.patch; do \
 FROM python:${PYTHON_VERSION}
 
 RUN apt-get update \
-    && packages="ca-certificates ffmpeg libseccomp2 mesa-va-drivers tini tzdata" \
+    && packages="ca-certificates ffmpeg libseccomp2 mesa-va-drivers openssl tini tzdata" \
     && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
          packages="${packages} intel-media-va-driver"; \
        fi \

@@ -28,7 +28,9 @@ def _run_login(tmp_path: Path, *, shell_port: str = "") -> str:
 
 
 def test_login_url_reads_setup_port_from_dotenv(tmp_path: Path) -> None:
-    assert "<Linux-IP>:9123" in _run_login(tmp_path)
+    output = _run_login(tmp_path)
+    assert "https://<Linux-IP>:9123" in output
+    assert "TLS 证书 SHA-256" in output
 
 
 def test_shell_setup_port_takes_precedence_over_dotenv(tmp_path: Path) -> None:

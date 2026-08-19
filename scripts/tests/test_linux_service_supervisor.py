@@ -160,6 +160,26 @@ def test_mtime_returns_none_when_state_path_is_missing(tmp_path: Path) -> None:
     assert isinstance(service_supervisor._mtime_ns(missing), int)
 
 
+def test_runtime_signature_ignores_homekit_pairing_config_writes(
+    tmp_path: Path,
+) -> None:
+    supervisor = _ready_supervisor(tmp_path)
+    before = service_supervisor._runtime_signature(
+        supervisor.settings_store.path,
+        supervisor.token_file,
+    )
+
+    supervisor.config_file.write_text("homekit:\n  ezviz:\n    pairings: []\n")
+
+    assert (
+        service_supervisor._runtime_signature(
+            supervisor.settings_store.path,
+            supervisor.token_file,
+        )
+        == before
+    )
+
+
 def test_stop_child_preserves_a_process_that_cannot_be_reaped(tmp_path: Path) -> None:
     supervisor = _ready_supervisor(tmp_path)
     process = FakeProcess(stubborn=True)
@@ -197,6 +217,50 @@ def test_supervisor_run_starts_reloads_and_stops_one_child_at_a_time(
     assert "terminate" in processes[-1].calls
 
 
+def test_homekit_pairing_write_does_not_restart_the_running_child(
+    tmp_path: Path,
+) -> None:
+    processes: list[FakeProcess] = []
+
+    def fake_popen(_command: list[str], **_kwargs: object) -> FakeProcess:
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    supervisor = _ready_supervisor(tmp_path, popen=fake_popen)
+    real_ready = supervisor._ready
+    ready_calls = 0
+
+    def counted_ready() -> tuple[dict[str, object], bool, str]:
+        nonlocal ready_calls
+        ready_calls += 1
+        return real_ready()
+
+    supervisor._ready = counted_ready  # type: ignore[method-assign]
+    thread = threading.Thread(target=supervisor.run, daemon=True)
+    thread.start()
+    try:
+        _wait_until(
+            lambda: len(processes) == 1 and supervisor.status()["state"] == "running"
+        )
+        observed_calls = ready_calls
+        supervisor.config_file.write_text(
+            "homekit:\n  ezviz:\n    pairings:\n      - client_id=private\n"
+        )
+        _wait_until(
+            lambda: (
+                ready_calls > observed_calls
+                and supervisor.status()["state"] == "running"
+            )
+        )
+        assert len(processes) == 1
+    finally:
+        supervisor.request_stop()
+        thread.join(timeout=3)
+
+    assert not thread.is_alive()
+
+
 def test_supervisor_run_retries_after_an_unexpected_child_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -212,7 +276,9 @@ def test_supervisor_run_retries_after_an_unexpected_child_exit(
     thread = threading.Thread(target=supervisor.run, daemon=True)
     thread.start()
     try:
-        _wait_until(lambda: len(processes) == 2)
+        _wait_until(
+            lambda: len(processes) == 2 and supervisor.status()["state"] == "running"
+        )
         assert supervisor.status()["state"] == "running"
     finally:
         supervisor.request_stop()

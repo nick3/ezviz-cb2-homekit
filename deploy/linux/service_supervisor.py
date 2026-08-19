@@ -24,7 +24,8 @@ from runtime_settings import (
     token_is_ready,
     token_matches_serial,
 )
-from setup_wizard import WizardApplication, create_server
+from setup_wizard import DEFAULT_SETUP_HOST, WizardApplication, create_server
+from tls_config import TLSConfigError, ensure_tls_certificate
 
 RESTART_DELAY_SECONDS = 5.0
 
@@ -34,6 +35,16 @@ def _mtime_ns(path: Path) -> int | None:
         return path.stat().st_mtime_ns
     except OSError:
         return None
+
+
+def _runtime_signature(settings_path: Path, token_file: Path) -> tuple[int | None, ...]:
+    """Track only wizard-owned state, not HomeKit's pairing writes."""
+
+    return (
+        _mtime_ns(settings_path),
+        _mtime_ns(token_file),
+        _mtime_ns(token_file.with_name(AUTH_STATE_FILE_NAME)),
+    )
 
 
 def bridge_command(
@@ -188,11 +199,9 @@ class BridgeSupervisor:
         last_signature: tuple[int | None, ...] | None = None
         try:
             while not self.stop_event.is_set():
-                signature = (
-                    _mtime_ns(self.settings_store.path),
-                    _mtime_ns(self.token_file),
-                    _mtime_ns(self.token_file.with_name(AUTH_STATE_FILE_NAME)),
-                    _mtime_ns(self.config_file),
+                signature = _runtime_signature(
+                    self.settings_store.path,
+                    self.token_file,
                 )
                 if last_signature is not None and signature != last_signature:
                     self.reload_event.set()
@@ -305,7 +314,8 @@ def main() -> int:
     )
     template = script_dir / "go2rtc.yaml.tmpl"
     html_file = script_dir / "wizard.html"
-    host = os.environ.get("EZVIZ_SETUP_HOST", "0.0.0.0")
+    host = os.environ.get("EZVIZ_SETUP_HOST", DEFAULT_SETUP_HOST).strip()
+    host = host or DEFAULT_SETUP_HOST
     port = _positive_port(os.environ.get("EZVIZ_SETUP_PORT", "8099"))
 
     settings_store = SettingsStore(data_dir)
@@ -315,6 +325,16 @@ def main() -> int:
         print(f"[桥接服务] 无法启动：{error}", file=sys.stderr, flush=True)
         return 1
     startup_error = _initialize_persistent_state(settings_store, config_file, template)
+    addresses = interface_ipv4_addresses()
+    try:
+        tls = ensure_tls_certificate(data_dir, host=host, addresses=addresses)
+    except (OSError, TLSConfigError) as error:
+        print(
+            f"[Web 向导] 无法安全启动 HTTPS 服务：{error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
 
     supervisor = BridgeSupervisor(
         settings_store=settings_store,
@@ -335,7 +355,22 @@ def main() -> int:
         reload_callback=supervisor.request_reload,
         bridge_status=supervisor.status,
     )
-    server = create_server(application, host, port)
+    try:
+        server = create_server(
+            application,
+            host,
+            port,
+            certificate=tls.certificate,
+            private_key=tls.private_key,
+        )
+    except OSError as error:
+        print(
+            f"[Web 向导] 无法启动 HTTPS 服务：{error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        application.close()
+        return 1
     server_thread = threading.Thread(
         target=server.serve_forever,
         kwargs={"poll_interval": 0.5},
@@ -349,12 +384,18 @@ def main() -> int:
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
     server_thread.start()
-    addresses = interface_ipv4_addresses()
-    if addresses:
-        for address in addresses:
-            print(f"[Web 向导] http://{address}:{port}", flush=True)
+    created = "（首次生成）" if tls.created else ""
+    print(
+        f"[Web 向导] TLS 证书 SHA-256{created}：{tls.fingerprint}",
+        flush=True,
+    )
+    display_addresses = addresses if host in {DEFAULT_SETUP_HOST, "::"} else [host]
+    if display_addresses:
+        for address in display_addresses:
+            url_host = f"[{address}]" if ":" in address else address
+            print(f"[Web 向导] https://{url_host}:{port}", flush=True)
     else:
-        print(f"[Web 向导] 已在端口 {port} 启动。", flush=True)
+        print(f"[Web 向导] HTTPS 已在端口 {port} 启动。", flush=True)
 
     try:
         supervisor.run()

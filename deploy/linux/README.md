@@ -24,10 +24,10 @@ host network 会让容器共享宿主机网络栈，因此建议放在专用、�
 Linux 虚拟机上。本配置同时使用非 root UID、只读根文件系统、删除全部
 Linux capabilities 和 `no-new-privileges`，但这些措施不能把 host network
 重新变成隔离网络。Web 向导会短暂接收萤石账号和密码，因此不要把 `8099`
-映射到公网，也不要在不可信网络中使用该页面；账号、密码和短信验证码只
-保存在请求处理内存中，不会写入状态卷。向导即使监听所有接口，也会拒绝
-环回、链路本地、RFC 1918、CGNAT 和 IPv6 ULA 之外的客户端；多网卡主机还
-可通过 `.env` 中的 `EZVIZ_SETUP_HOST` 将它绑定到指定的可信 LAN 地址。
+映射到公网。向导只通过 HTTPS 接收请求；账号、密码和短信验证码只保存在
+请求处理内存中，不会写入状态卷。即使监听所有接口，它也会拒绝环回、链路
+本地、RFC 1918、CGNAT 和 IPv6 ULA 之外的客户端；多网卡主机还可通过
+`.env` 中的 `EZVIZ_SETUP_HOST` 将它绑定到指定的可信 LAN 地址。
 
 ## 首次部署
 
@@ -51,8 +51,15 @@ ghcr.io/nick3/ezviz-cb2-homekit:latest
 镜像同时支持 `linux/amd64` 与 `linux/arm64`。启动后打开：
 
 ```text
-http://<Linux 服务器局域网 IP>:8099
+https://<Linux 服务器局域网 IP>:8099
 ```
+
+首次启动会在状态卷中生成本部署独有的自签 TLS 证书和私钥，浏览器因此会
+显示证书不受公共 CA 信任。继续访问前先运行 `docker compose logs bridge`，
+将日志中的 `TLS 证书 SHA-256` 与浏览器证书详情中的 SHA-256 指纹逐字比对；
+匹配后再提交萤石账号。证书会跨容器升级保留，因此正常重启不会更换指纹。
+若 Linux 主机 IP 发生变化，删除状态卷中的 `wizard-cert.pem` 和
+`wizard-key.pem` 后重启即可为新地址生成一对证书；私钥不得复制给其他主机。
 
 Web 向导会依次完成：
 
@@ -216,8 +223,9 @@ chmod 600 /安全路径/ezviz_token.json
 - seccomp 同步应用到该进程的全部线程，并由后续 FFmpeg 子进程继承；规则
   拒绝新的 `socket()` 和 `connect()`，已有摄像头 TCP 流仍可继续读取。
 - Docker 命名卷 `ezviz-homekit_ezviz-data` 中的 `go2rtc.yaml` 含 HomeKit
-  配对信息，`ezviz_token.json` 含萤石会话，`settings.json` 含非密码运行
-  参数。整个状态卷必须按密钥材料备份和传输，不要提交到 Git。
+  配对信息，`ezviz_token.json` 含萤石会话，`wizard-key.pem` 是 Web 向导
+  TLS 私钥，`settings.json` 含非密码运行参数。整个状态卷必须按密钥材料
+  备份和传输，不要提交到 Git。
 - 常电策略启动并完成首次取流后，后续查看通常无需再次唤醒。纯电池模式在
   10 分钟保温或 PIR 预热窗口内也可直接复用现有流；窗口到期后的下一次查看
   仍是冷启动，通常需要十几秒。保温和事件预热都会增加耗电。

@@ -389,6 +389,8 @@
     async function pollStatus() {
       try {
         if (!document.hidden) await refreshStatus();
+      } catch (error) {
+        console.debug('状态轮询失败', error);
       } finally {
         window.setTimeout(pollStatus, 3000);
       }

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import shutil
+import ssl
 import stat
 import sys
 import threading
-from http.client import HTTPConnection
+from http.client import HTTPSConnection
 from pathlib import Path
 from typing import ClassVar
 
@@ -16,6 +18,7 @@ sys.path.insert(0, str(LINUX_DIR))
 
 import runtime_settings  # noqa: E402
 import setup_wizard  # noqa: E402
+import tls_config  # noqa: E402
 
 
 class VerificationRequired(Exception):
@@ -90,6 +93,37 @@ def _application(
     return application, reloaded
 
 
+def _https_server(
+    application: setup_wizard.WizardApplication,
+    tmp_path: Path,
+) -> setup_wizard.ThreadingHTTPServer:
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        pytest.skip("openssl is required by the Linux runtime image")
+    tls = tls_config.ensure_tls_certificate(
+        tmp_path / "data",
+        host="127.0.0.1",
+        addresses=["127.0.0.1"],
+        openssl_bin=openssl,
+    )
+    try:
+        return setup_wizard.create_server(
+            application,
+            "127.0.0.1",
+            0,
+            certificate=tls.certificate,
+            private_key=tls.private_key,
+        )
+    except PermissionError:
+        pytest.skip("the execution sandbox forbids local listener sockets")
+
+
+def _trusted_tls_context(tmp_path: Path) -> ssl.SSLContext:
+    return ssl.create_default_context(
+        cafile=str(tmp_path / "data" / tls_config.CERTIFICATE_FILE_NAME)
+    )
+
+
 def test_mfa_login_keeps_password_only_in_memory_and_saves_private_token(
     tmp_path: Path,
 ) -> None:
@@ -137,17 +171,76 @@ def test_cloud_assisted_identification_expands_suffix_and_returns_lan_ip(
     )
 
 
+def test_failed_token_replacement_leaves_the_binding_invalidated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application, reloaded = _application(tmp_path)
+    runtime_settings.secure_write(
+        application.token_file,
+        b'{"session_id":"old-session"}\n',
+    )
+    runtime_settings.secure_write(
+        application.token_file.with_name(runtime_settings.AUTH_STATE_FILE_NAME),
+        b'{"serial":"TESTCB2123456"}\n',
+    )
+    real_secure_write = setup_wizard.secure_write
+
+    def fail_token_write(path: Path, data: bytes) -> None:
+        if path == application.token_file:
+            raise OSError("simulated token write failure")
+        real_secure_write(path, data)
+
+    monkeypatch.setattr(setup_wizard, "secure_write", fail_token_write)
+    assert (
+        application.run_login({"account": "owner", "password": "secret"})["state"]
+        == "sms_required"
+    )
+
+    with pytest.raises(OSError, match="token write failure"):
+        application.run_login({"sms_code": "123456"})
+
+    assert json.loads(
+        application.token_file.with_name("ezviz_auth.json").read_text()
+    ) == {"state": "updating", "serial": ""}
+    assert json.loads(application.token_file.read_text()) == {
+        "session_id": "old-session"
+    }
+    assert reloaded.is_set() is False
+    assert FakeClient.instances[-1].closed is True
+
+
+def test_mfa_completion_failure_closes_and_discards_pending_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application, _ = _application(tmp_path)
+    assert (
+        application.run_login({"account": "owner", "password": "secret"})["state"]
+        == "sms_required"
+    )
+    client = FakeClient.instances[-1]
+    monkeypatch.setattr(client, "get_device_infos", lambda _serial=None: {})
+
+    with pytest.raises(setup_wizard.WizardError, match="没有找到摄像头"):
+        application.run_login({"sms_code": "123456"})
+
+    assert client.closed is True
+    with pytest.raises(setup_wizard.WizardError, match="会话已失效"):
+        application.run_login({"sms_code": "123456"})
+
+
 def test_http_server_requires_csrf_for_mutations_and_reports_status(
     tmp_path: Path,
 ) -> None:
     application, _ = _application(tmp_path)
-    try:
-        server = setup_wizard.create_server(application, "127.0.0.1", 0)
-    except PermissionError:
-        pytest.skip("the execution sandbox forbids local listener sockets")
+    server = _https_server(application, tmp_path)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+    connection = HTTPSConnection(
+        "127.0.0.1",
+        server.server_port,
+        timeout=3,
+        context=_trusted_tls_context(tmp_path),
+    )
     try:
         connection.request("GET", "/")
         page = connection.getresponse()
@@ -235,13 +328,15 @@ def test_http_server_rejects_disallowed_clients_before_read_or_write(
 ) -> None:
     application, _ = _application(tmp_path)
     monkeypatch.setattr(setup_wizard, "_client_allowed", lambda _address: False)
-    try:
-        server = setup_wizard.create_server(application, "127.0.0.1", 0)
-    except PermissionError:
-        pytest.skip("the execution sandbox forbids local listener sockets")
+    server = _https_server(application, tmp_path)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+    connection = HTTPSConnection(
+        "127.0.0.1",
+        server.server_port,
+        timeout=3,
+        context=_trusted_tls_context(tmp_path),
+    )
     try:
         connection.request("GET", "/api/status")
         denied_read = connection.getresponse()
@@ -276,4 +371,5 @@ def test_wizard_markup_uses_step_semantics_and_serial_status_polling() -> None:
     assert html.count('aria-labelledby="step-') == 4
     assert 'aria-current="step"' in html
     assert "setInterval(refreshStatus" not in html
+    assert "catch (error)" in html
     assert "window.setTimeout(pollStatus, 3000)" in html
